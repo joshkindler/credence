@@ -1,0 +1,1575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+<script>
+/* Static-hosting adapter: gives the page the same db/user interface it gets inside Claude,
+   backed by data.json (everyone) and this browser's storage (organizer mode only, ?organizer). */
+(function () {
+  const ORG = /(^|[?&])organizer(=|&|$)/.test(location.search);
+  const KEY = 'credence-organizer-v1';
+  const PUBLIC = [/^config\//, /^resolutions\//, /^public\//, /^revealed\//];
+  const store = new Map();
+  const listeners = [];
+  const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+  const depth = p => p.split('/').length;
+  const snapDoc = p => { const d = store.get(p); return { id: p.split('/').pop(), exists: d !== undefined, data: () => clone(d), metadata: { fromCache: false, hasPendingWrites: false } }; };
+  const docsOf = c => [...store.keys()].filter(p => p.startsWith(c + '/') && depth(p) === depth(c) + 1).sort().map(snapDoc);
+  const qsnap = c => { const docs = docsOf(c); return { docs, size: docs.length, empty: !docs.length, docChanges: () => [], metadata: { fromCache: false } }; };
+  const persist = () => { if (!ORG) return; try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(store))); } catch (e) { /* storage unavailable */ } };
+  const notify = () => listeners.slice().forEach(l => { try { l.fn(l.kind === 'doc' ? snapDoc(l.path) : qsnap(l.path)); } catch (e) { console.error(e); } });
+  const guard = () => { if (!ORG) throw { code: 'permission-denied', message: 'Only the organizer can change data on this site.' }; };
+  const write = (p, d) => { guard(); store.set(p, clone(d)); persist(); notify(); };
+
+  const db = {
+    doc: p => ({ path: p, id: p.split('/').pop(),
+      get: async () => snapDoc(p),
+      set: async d => write(p, d),
+      update: async d => write(p, { ...(store.get(p) || {}), ...d }),
+      delete: async () => { guard(); store.delete(p); persist(); notify(); },
+      onSnapshot: (fn) => { const l = { kind: 'doc', path: p, fn }; listeners.push(l); setTimeout(() => fn(snapDoc(p)), 0); return () => { const i = listeners.indexOf(l); if (i >= 0) listeners.splice(i, 1); }; } }),
+    collection: c => ({ path: c,
+      get: async () => qsnap(c),
+      onSnapshot: (fn) => { const l = { kind: 'coll', path: c, fn }; listeners.push(l); setTimeout(() => fn(qsnap(c)), 0); return () => { const i = listeners.indexOf(l); if (i >= 0) listeners.splice(i, 1); }; },
+      doc: id => db.doc(c + '/' + id) })
+  };
+  const user = {
+    id: async () => ORG ? 'organizer' : 'visitor',
+    canEdit: async () => ORG, isOwner: async () => ORG, can: async () => ORG,
+    me: async () => ({ name: ORG ? 'Organizer' : '', id: ORG ? 'organizer' : 'visitor' })
+  };
+
+  const ready = (async () => {
+    let flat = null;
+    if (ORG) { try { const raw = localStorage.getItem(KEY); if (raw) flat = JSON.parse(raw); } catch (e) { flat = null; } }
+    if (!flat) {
+      try {
+        const r = await fetch('data.json', { cache: 'no-store' });
+        if (r.ok) flat = (await r.json()).docs || {};
+      } catch (e) { flat = null; }
+    }
+    for (const k in (flat || {})) store.set(k, flat[k]);
+  })();
+
+  const download = (name, obj) => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 1)], { type: 'application/json' }));
+    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  };
+  window.__HOSTED__ = {
+    organizer: ORG,
+    exportPublic() {
+      const docs = {};
+      for (const [k, v] of store) if (PUBLIC.some(r => r.test(k))) docs[k] = v;
+      download('data.json', { generatedAt: new Date().toISOString(), docs });
+      return Object.keys(docs).length;
+    },
+    exportBackup() { download('organizer-backup-PRIVATE.json', { generatedAt: new Date().toISOString(), docs: Object.fromEntries(store) }); },
+    async importBackup(text) {
+      const j = JSON.parse(text);
+      if (!j || typeof j.docs !== 'object') throw new Error('That isn’t an organizer backup file.');
+      store.clear(); for (const k in j.docs) store.set(k, j.docs[k]);
+      persist(); notify(); return store.size;
+    }
+  };
+  window.claude = { use: async name => { await ready; return name === 'db' ? db : name === 'user' ? user : null; } };
+})();
+
+</script>
+</head>
+<body>
+<title>Credence Challenge</title>
+<meta name="robots" content="noindex">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap">
+<style>
+/* Layout: one narrow column with a sticky masthead; forecasting rows pair each statement with a
+   probability box and a slider; results views are tables and a dot-strip per question. */
+:root {
+  --bg: #F2F5F8; --surface: #FFFFFF; --surface-2: #E8EDF2; --ink: #111B25; --ink-2: #4B5C6B; --line: #D3DBE3;
+  --accent: #2447C8; --accent-ink: #FFFFFF; --accent-soft: #E3E9FB;
+  --yes: #1B7A58; --yes-soft: #DCF1E7; --no: #B23B2B; --no-soft: #F7E1DC; --warn: #8A5A00; --warn-soft: #FBEBCB;
+  --font-display: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --font-body: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1419; --surface: #151D25; --surface-2: #1F2A34; --ink: #E6EDF3; --ink-2: #9AAAB8; --line: #2B3844;
+    --accent: #86A2FF; --accent-ink: #0B1220; --accent-soft: #1C2A52;
+    --yes: #4CC38A; --yes-soft: #163A2C; --no: #F08A78; --no-soft: #42211C; --warn: #E0A64A; --warn-soft: #3A2C10;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1419; --surface: #151D25; --surface-2: #1F2A34; --ink: #E6EDF3; --ink-2: #9AAAB8; --line: #2B3844;
+  --accent: #86A2FF; --accent-ink: #0B1220; --accent-soft: #1C2A52;
+  --yes: #4CC38A; --yes-soft: #163A2C; --no: #F08A78; --no-soft: #42211C; --warn: #E0A64A; --warn-soft: #3A2C10;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.5 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 56px;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; margin: 0; }
+p { margin: 0; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wrap { max-width: 960px; margin: 0 auto; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Masthead */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--bg); padding-top: 14px; border-bottom: 1px solid var(--line); }
+.top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.brand h1 { font-size: 24px; line-height: 1.1; letter-spacing: -0.01em; }
+.brand p { color: var(--ink-2); font-size: 13px; margin-top: 3px; }
+.top-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pill { font: 600 11px var(--font-body); letter-spacing: .06em; text-transform: uppercase; padding: 5px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.pill.locked { background: var(--warn-soft); color: var(--warn); }
+.pill.revealed { background: var(--yes-soft); color: var(--yes); }
+.hcount { font: 500 13px var(--font-mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.tabs { display: flex; gap: 2px; overflow-x: auto; margin-top: 8px; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs a { padding: 10px 13px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; font-weight: 500; white-space: nowrap; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+.progress { padding: 10px 0 0; display: grid; gap: 6px; }
+.progress-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ptext { font: 500 13px var(--font-mono); color: var(--ink); font-variant-numeric: tabular-nums; }
+.ptext b { font-weight: 600; }
+.plink { font: 600 13px var(--font-body); color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.bar { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; transition: width .2s; }
+.bar.full i { background: var(--yes); }
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+
+.banner { margin-top: 14px; padding: 11px 14px; border-radius: var(--radius); background: var(--warn-soft); color: var(--warn); font-weight: 500; }
+main { padding-top: 22px; display: grid; gap: 18px; }
+main > section { display: grid; gap: 18px; align-content: start; min-width: 0; }
+main > section[hidden] { display: none; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; min-width: 0; }
+.card > h2 { font-size: 20px; margin-bottom: 8px; }
+.card > h3 { font-size: 16px; margin-bottom: 8px; }
+.muted { color: var(--ink-2); }
+.small { font-size: 13px; }
+.stack { display: grid; gap: 12px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* Forms and buttons */
+input[type=text], input[type=date], input[type=datetime-local], input[type=url], select {
+  font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0; max-width: 100%;
+}
+input:disabled, select:disabled { opacity: .6; }
+.btn { font: 600 14px var(--font-body); padding: 9px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+.btn:hover { border-color: var(--ink-2); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; gap: 8px; align-items: center; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink); font: 500 13px var(--font-body); cursor: pointer; }
+.chip b { font: 500 12px var(--font-mono); color: var(--ink-2); }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip[aria-pressed="true"] b { color: var(--bg); }
+.note { padding: 11px 14px; border-radius: var(--radius); background: var(--surface-2); color: var(--ink); }
+
+/* Forecast rows */
+.sec { scroll-margin-top: 210px; }
+.q { scroll-margin-top: 210px; }
+.sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 0 2px 6px; }
+.sec-head h2 { font-size: 21px; }
+.sec-count { font: 500 12px var(--font-mono); color: var(--ink-2); }
+.sec-note { color: var(--ink-2); font-size: 13px; padding: 0 2px 8px; }
+.sec-body { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0 16px; }
+.q { display: grid; grid-template-columns: 2.1rem minmax(0, 1fr) auto; grid-template-areas: "n t p" ". s s" ". o o"; gap: 4px 12px; padding: 14px 0; border-top: 1px solid var(--line); }
+.q:first-child { border-top: 0; }
+.qn { grid-area: n; font: 500 12px var(--font-mono); color: var(--ink-2); padding-top: 3px; }
+.qt { grid-area: t; min-width: 0; }
+.qm { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.pct { grid-area: p; display: flex; align-items: center; gap: 4px; align-self: start; font-family: var(--font-mono); color: var(--ink-2); }
+.pin { width: 4.4rem; text-align: right; font: 500 16px var(--font-mono); font-variant-numeric: tabular-nums; padding: 6px 8px; border: 1px dashed var(--warn); border-radius: 8px; background: var(--surface); color: var(--ink); -moz-appearance: textfield; }
+.pin::-webkit-outer-spin-button, .pin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.q.done .pin { border-style: solid; border-color: var(--line); }
+.pin.bad { border-color: var(--no); color: var(--no); }
+.qs { grid-area: s; padding-top: 4px; }
+.po { grid-area: o; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-top: 6px; font-size: 13px; color: var(--ink-2); }
+.po .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+
+input[type=range] { width: 100%; height: 26px; background: transparent; -webkit-appearance: none; appearance: none; margin: 0; cursor: pointer; --fill: 0%; }
+input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--accent) var(--fill), var(--surface-2) var(--fill)); }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; margin-top: -7px; border-radius: 50%; background: var(--surface); border: 3px solid var(--accent); }
+input[type=range]::-moz-range-track { height: 6px; border-radius: 3px; background: var(--surface-2); }
+input[type=range]::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--accent); }
+input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--surface); border: 3px solid var(--accent); }
+input[type=range].unset::-webkit-slider-runnable-track { background: var(--surface-2); }
+input[type=range].unset::-webkit-slider-thumb { border-color: var(--line); }
+input[type=range].unset::-moz-range-progress { background: transparent; }
+input[type=range].unset::-moz-range-thumb { border-color: var(--line); }
+input[type=range]:disabled { cursor: default; opacity: .6; }
+
+/* Tables */
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th { text-align: left; font: 600 11px var(--font-body); letter-spacing: .07em; text-transform: uppercase; color: var(--ink-2); padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+td.num, th.num { text-align: right; font-family: var(--font-mono); }
+tr.me td { background: var(--accent-soft); }
+.scale { position: relative; height: 6px; width: 96px; background: var(--surface-2); border-radius: 3px; display: inline-block; vertical-align: middle; margin-left: 10px; }
+.scale::after { content: ""; position: absolute; left: 50%; top: -4px; bottom: -4px; width: 1px; background: var(--ink-2); }
+.scale i { position: absolute; top: -3px; width: 10px; height: 12px; margin-left: -5px; border-radius: 3px; background: var(--accent); }
+@media (max-width: 640px) { .scale { display: none; } }
+
+.out { font: 600 11px var(--font-mono); padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+.out.yes { background: var(--yes-soft); color: var(--yes); }
+.out.no { background: var(--no-soft); color: var(--no); }
+.out.void { background: var(--surface-2); color: var(--ink-2); }
+.list { display: grid; gap: 0; }
+.item { display: grid; grid-template-columns: 2.1rem minmax(0, 1fr) auto; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
+.item:first-child { border-top: 0; }
+.item .qn { padding-top: 2px; }
+.item .meta { font-size: 12px; color: var(--ink-2); margin-top: 2px; overflow-wrap: anywhere; }
+
+/* Crowd */
+.cq { border-top: 1px solid var(--line); }
+.cq:first-child { border-top: 0; }
+.cq > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 2.1rem minmax(0, 1fr) auto; gap: 6px 12px; padding: 14px 0; }
+.cq > summary::-webkit-details-marker { display: none; }
+.cq .stats { font: 500 12px var(--font-mono); color: var(--ink-2); text-align: right; white-space: nowrap; }
+.cq .stats b { color: var(--ink); font-size: 16px; font-weight: 500; }
+.strip { grid-column: 2 / 4; position: relative; height: 24px; background-image: linear-gradient(to right, var(--line) 1px, transparent 1px); background-size: 25% 100%; border-right: 1px solid var(--line); }
+.strip::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; background: var(--surface-2); }
+.dot { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--accent); opacity: .5; }
+.dot.me { opacity: 1; outline: 2px solid var(--ink); outline-offset: 1px; }
+.mean { position: absolute; top: 1px; bottom: 1px; width: 3px; margin-left: -1.5px; border-radius: 2px; background: var(--ink); }
+.who-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 18px; padding: 0 0 14px calc(2.1rem + 12px); }
+.who-list div { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; border-bottom: 1px dotted var(--line); padding: 3px 0; }
+.who-list b { font: 500 13px var(--font-mono); }
+.who-list .me { color: var(--accent); }
+
+/* Home */
+a.btn { text-decoration: none; display: inline-block; }
+.home-hero h2 { font-size: 28px; line-height: 1.15; letter-spacing: -0.01em; }
+.lede { font-size: 16px; max-width: 62ch; }
+.facts { display: flex; flex-wrap: wrap; gap: 10px 32px; }
+.fact b { display: block; font: 500 24px var(--font-mono); font-variant-numeric: tabular-nums; }
+.fact span { font-size: 12px; color: var(--ink-2); }
+.steps { margin: 0; padding-left: 22px; display: grid; gap: 8px; max-width: 62ch; }
+
+/* Prose (rules) */
+.prose { display: grid; gap: 12px; max-width: 70ch; }
+.prose h3 { margin-top: 8px; }
+.prose ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.formula { font-family: var(--font-mono); background: var(--surface-2); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+
+/* Organizer */
+.res-row { display: grid; grid-template-columns: 2.1rem minmax(0, 1fr); gap: 6px 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.res-row .fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.res-row input[type=url], .res-row input.note-in { flex: 1 1 180px; }
+.toast { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 8px; z-index: 40; max-width: calc(100vw - 32px); font-weight: 500; }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <div class="top-row">
+      <div class="brand">
+        <h1>Credence Challenge</h1>
+        <p>100 propositions about 2027. Give each a probability.</p>
+      </div>
+      <div class="top-right">
+        <span id="phase" class="pill">Loading</span>
+      </div>
+    </div>
+    <div class="progress" id="progress" hidden>
+      <div class="progress-row">
+        <span class="ptext" id="ptext"></span>
+        <button type="button" class="plink" id="pnext" hidden>Jump to next blank</button>
+      </div>
+      <div class="bar" id="bar" role="progressbar" aria-label="Forecasts entered" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="barfill"></i></div>
+    </div>
+    <nav class="tabs" id="tabs" aria-label="Sections"></nav>
+  </div>
+</header>
+<div class="wrap">
+  <div id="banner" class="banner" role="status" hidden></div>
+  <main id="view">
+    <section id="v-home" hidden></section>
+    <section id="v-rules" hidden></section>
+    <section id="v-forecasts" hidden></section>
+    <section id="v-standings" hidden></section>
+    <section id="v-crowd" hidden></section>
+    <section id="v-organizer" hidden></section>
+  </main>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+const SECTIONS = [
+  { id: 'us', title: 'US politics and world', kind: 'public' },
+  { id: 'econ', title: 'Economy and markets', kind: 'public' },
+  { id: 'tech', title: 'Tech and AI', kind: 'public' },
+  { id: 'culture', title: 'Culture, sports, science, and nature', kind: 'public' },
+  { id: 'personal', title: 'Personal', kind: 'personal',
+    note: 'Answer about yourself. Other participants never see these, and they are left out of the crowd view. You report what actually happened in January 2028.' },
+  { id: 'dept', title: 'Department', kind: 'dept',
+    note: 'About the philosophy department. The organizer decides whether these appear in the crowd view.' },
+  { id: 'meta', title: 'Meta', kind: 'meta',
+    note: 'Scored at the end from your own results and your standing. Not shown in the crowd view.' }
+];
+
+const _Q = (id, sec, text, when) => ({ id, sec, text, when: when || '2027-12' });
+
+const QUESTIONS = [
+  // US politics and world
+  _Q(1, 'us', 'Donald Trump is still president and JD Vance is still vice president on Dec 31, 2027.'),
+  _Q(2, 'us', 'A government shutdown of at least one full day begins during 2027.'),
+  _Q(3, 'us', 'A sitting US Supreme Court justice announces retirement or dies during 2027.'),
+  _Q(4, 'us', 'At least three sitting Democratic governors or US senators have formally declared a 2028 presidential run.'),
+  _Q(5, 'us', 'Alexandria Ocasio-Cortez formally declares a 2028 presidential run.'),
+  _Q(6, 'us', 'Jon Ossoff formally declares a 2028 presidential run.'),
+  _Q(7, 'us', 'Trump’s approval rating is higher on Dec 31, 2027 than on Jan 1, 2027 (RealClearPolitics approval average).'),
+  _Q(8, 'us', 'A formal ceasefire or peace agreement between Russia and Ukraine is in effect on Dec 31, 2027.'),
+  _Q(9, 'us', 'Vladimir Putin is still president of Russia on Dec 31, 2027.'),
+  _Q(10, 'us', 'Zelensky is still president of Ukraine on Dec 31, 2027.'),
+  _Q(11, 'us', 'Xi Jinping is still president of China on Dec 31, 2027.'),
+  _Q(12, 'us', 'Friedrich Merz is still chancellor of Germany on Dec 31, 2027.'),
+  _Q(13, 'us', 'Trump invokes the Insurrection Act during 2027.'),
+  _Q(14, 'us', 'JD Vance is the Polymarket favorite for the 2028 GOP nomination on Dec 31, 2027.'),
+  _Q(15, 'us', 'Gavin Newsom is the Polymarket favorite for the 2028 Democratic nomination on Dec 31, 2027.'),
+  _Q(16, 'us', 'Jon Ossoff is the Polymarket favorite for the 2028 Democratic nomination on Dec 31, 2027.'),
+  _Q(17, 'us', 'The US and Iran sign a formal agreement ending hostilities during 2027.'),
+  _Q(18, 'us', 'Iran’s Supreme Leader is still Mojtaba Khamenei on Dec 31, 2027.'),
+  _Q(19, 'us', 'Iran conducts a nuclear test.'),
+  _Q(20, 'us', 'China blockades (commercial shipping to Taiwan halted 7+ days) or invades Taiwan.'),
+  _Q(21, 'us', 'Xi Jinping gets a fourth term as general secretary at the 21st Party Congress (fall 2027).', '2027-11'),
+  _Q(22, 'us', 'Jordan Bardella wins the French presidency.', '2027-05'),
+  _Q(23, 'us', 'Marine Le Pen wins the French presidency.', '2027-05'),
+  _Q(24, 'us', 'Andy Burnham is UK Prime Minister on Dec 31, 2027.'),
+  _Q(25, 'us', 'A UK general election is held during 2027.'),
+  _Q(26, 'us', 'Reform UK leads Labour in the Election Maps UK poll average on Dec 31, 2027.'),
+  _Q(27, 'us', 'Benjamin Netanyahu is still prime minister of Israel on Dec 31, 2027.'),
+  _Q(28, 'us', 'A sitting member of Congress is indicted by federal or state prosecutors during 2027.'),
+
+  // Economy and markets
+  _Q(29, 'econ', 'The S&P 500 closes 2027 above 7,800.'),
+  _Q(30, 'econ', 'The S&P 500 closes 2027 above 9,000.'),
+  _Q(31, 'econ', 'The S&P 500 closes below 6,250 (20% under today) at least once during 2027.'),
+  _Q(32, 'econ', 'Bitcoin is above $84,000 on Dec 31, 2027.'),
+  _Q(33, 'econ', 'Brent crude is above $100 on Dec 31, 2027.'),
+  _Q(34, 'econ', 'US CPI inflation (year over year, Nov 2027 print) is below 3.0%.'),
+  _Q(35, 'econ', 'US unemployment rate (Nov 2027 report) is 5.0% or higher.'),
+  _Q(36, 'econ', 'US real GDP shrinks for two consecutive quarters during 2027 (advance estimates).'),
+  _Q(37, 'econ', 'The 10-year Treasury yield is above 5% on Dec 31, 2027.'),
+  _Q(38, 'econ', 'Nvidia is the world’s largest company by market cap on Dec 31, 2027.'),
+  _Q(39, 'econ', 'Gold closes 2027 higher than it closed 2026.'),
+  _Q(40, 'econ', 'India’s nominal GDP exceeds Germany’s in the IMF October 2027 World Economic Outlook.', '2027-10'),
+
+  // Tech and AI
+  _Q(41, 'tech', 'OpenAI is publicly traded on Dec 31, 2027.'),
+  _Q(42, 'tech', 'Anthropic is publicly traded on Dec 31, 2027.'),
+  _Q(43, 'tech', 'GTA VI is out on PC.'),
+  _Q(44, 'tech', 'OpenAI declares AGI under its Microsoft agreement and the independent expert panel verifies it.'),
+  _Q(45, 'tech', 'Congress enacts a law preempting state AI regulation.'),
+  _Q(46, 'tech', 'A frontier lab (OpenAI, Anthropic, Google DeepMind, xAI, Meta) publicly pauses training or withholds release of a frontier model citing safety.'),
+  _Q(47, 'tech', 'A cyberattack causing over $100M in damage is publicly attributed (by a government or major security firm) mainly to an autonomous AI agent.'),
+  _Q(48, 'tech', 'OpenAI reports over 2 billion weekly ChatGPT users.'),
+  _Q(49, 'tech', 'An OpenAI model is #1 on the LMArena text leaderboard on Dec 31, 2027.'),
+  _Q(50, 'tech', 'Waymo offers public, paid, fully driverless rides in New York City.'),
+  _Q(51, 'tech', 'Tesla offers rides with no safety monitor in the car to the public in at least 5 US metro areas.'),
+  _Q(52, 'tech', 'Apple ships a Siri revamp powered by a third-party frontier model (e.g., Gemini) to the general public by June 30, 2027.', '2027-06'),
+
+  // Culture, sports, science, and nature
+  _Q(53, 'culture', 'A film first released in 2027 grosses over $1 billion worldwide.'),
+  _Q(54, 'culture', 'A horror film first released in 2027 grosses over $300 million worldwide.'),
+  _Q(55, 'culture', 'Taylor Swift releases a new studio album (not a re-recording) during 2027.'),
+  _Q(56, 'culture', 'Super Bowl LXI averages over 125 million viewers.', '2027-02'),
+  _Q(57, 'culture', 'A Category 4 or 5 hurricane makes landfall in the continental US during 2027.'),
+  _Q(58, 'culture', 'Summer 2027 is the warmest summer on record globally (NASA or NOAA).', '2027-09'),
+  _Q(59, 'culture', 'The Best Picture winner at the March 2027 Oscars is distributed by a streaming-first company (Netflix, Apple, Amazon).', '2027-03'),
+  _Q(60, 'culture', 'Barcelona wins the 2026-27 Champions League.', '2027-05'),
+  _Q(61, 'culture', 'LeBron James publicly announces his retirement from the NBA during 2027.'),
+  _Q(62, 'culture', 'The USWNT wins the 2027 Women’s World Cup.', '2027-07'),
+  _Q(63, 'culture', 'A magnitude 7.5+ earthquake occurs anywhere in the world during 2027 (USGS catalog).'),
+  _Q(64, 'culture', 'At least one 2027 Nobel in Physics, Chemistry, or Medicine is awarded for work substantially involving AI or machine learning (the committee’s press release or background document explicitly names AI or machine learning).', '2027-10'),
+  _Q(65, 'culture', 'At least one woman is among the 2027 laureates in Physics, Chemistry, and Medicine combined (shared prizes count).', '2027-10'),
+  _Q(66, 'culture', 'The 2027 Nobel Peace Prize goes to an organization rather than an individual.', '2027-10'),
+  _Q(67, 'culture', 'The 2027 Nobel Prize in Literature goes to a writer whose primary language is English.', '2027-10'),
+  _Q(68, 'culture', 'A crewed landing puts a person on the Moon’s surface during 2027 (a flyby or orbit without a surface landing does not count).'),
+
+  // Personal
+  _Q(69, 'personal', 'I will live at a different address on Dec 31, 2027 than I do today.', '2028-01'),
+  _Q(70, 'personal', 'I will attend at least one wedding during 2027.', '2028-01'),
+  _Q(71, 'personal', 'I will publish at least one paper during 2027.', '2028-01'),
+  _Q(72, 'personal', 'I will add a pet to my household during 2027.', '2028-01'),
+  _Q(73, 'personal', 'My total income for 2027 will be higher than for 2026.', '2028-01'),
+  _Q(74, 'personal', 'I will take a trip outside my country (or countries) of residence lasting 7+ days during 2027.', '2028-01'),
+  _Q(75, 'personal', 'My net worth on Dec 31, 2027 will be higher than on Jan 1, 2027.', '2028-01'),
+  _Q(76, 'personal', 'I will still use my current primary phone (same device as today) on Dec 31, 2027.', '2028-01'),
+
+  // Department
+  _Q(77, 'dept', 'Faculty publish >5 papers in Leiter-ranked journals.'),
+  _Q(78, 'dept', 'Faculty publish >20 papers in Leiter-ranked journals.'),
+  _Q(79, 'dept', 'Faculty publish >1 book.'),
+  _Q(80, 'dept', 'Faculty coauthor a published paper (coauthored exclusively between Tufts faculty).'),
+  _Q(81, 'dept', 'Faculty win an APA award.'),
+  _Q(82, 'dept', 'A master’s student publishes an article in a Leiter-ranked journal.'),
+  _Q(83, 'dept', 'One department member (faculty or MA) starts a company.'),
+  _Q(84, 'dept', 'A philosophy course is offered with “Kant” in the title.'),
+  _Q(85, 'dept', 'The coffee machine works uninterrupted for at least 3 months.'),
+  _Q(86, 'dept', 'There is a Department Christmas Party in 2027.'),
+  _Q(87, 'dept', 'There is a Department Halloween Party in 2027.', '2027-10'),
+  _Q(88, 'dept', 'A department faculty member leaves for another institution during 2027.'),
+  _Q(89, 'dept', 'The department’s incoming grad cohort in fall 2027 is larger than in fall 2026.', '2027-09'),
+  _Q(90, 'dept', 'Tufts’ undergrad ethics bowl team will win their competition in Baltimore.'),
+  _Q(91, 'dept', 'A new full-time philosophy faculty member is hired.'),
+  _Q(92, 'dept', 'A fire alarm goes off during a philosophy class in 2027 (drills and false alarms count).'),
+  _Q(93, 'dept', 'Classes are cancelled for a full day, university-wide, because of a snow day in 2027 (partial-day closures, delayed openings, and remote-instruction days do not count).'),
+
+  // Meta
+  _Q(94, 'meta', 'I will finish in the top half of this challenge on questions 1-93.', '2028-01'),
+  _Q(95, 'meta', 'At least one of my forecasts of 85% or higher will turn out wrong.', '2028-01'),
+  _Q(96, 'meta', 'At least one of my forecasts of 15% or lower will turn out wrong.', '2028-01'),
+  _Q(97, 'meta', 'My score on questions 1-93 will beat what I’d have gotten by answering 50% on everything.', '2028-01'),
+  _Q(98, 'meta', 'My score will beat the average of everyone’s forecasts, scored question by question.', '2028-01'),
+  _Q(99, 'meta', 'I will come in first place in this challenge on questions 1-93.', '2028-01'),
+  _Q(100, 'meta', 'I will finish in the bottom 3 on questions 1-93.', '2028-01')
+];
+
+(function () {
+  const kindOf = Object.fromEntries(SECTIONS.map(s => [s.id, s.kind]));
+  QUESTIONS.forEach(q => { q.kind = kindOf[q.sec]; });
+})();
+
+
+const Scoring = (function () {
+  // Forecasts are stored as whole percents (1-99) under keys like "q12".
+  // A missing forecast counts as 50%. Probabilities are clipped to 1%-99%.
+  function clip(x) { return Math.min(0.99, Math.max(0.01, x)); }
+  function prob(v) { return (typeof v === 'number' && isFinite(v)) ? clip(v / 100) : 0.5; }
+  const logS = (p, o) => Math.log(o ? p : 1 - p); // log score, higher is better
+
+  // Outcome for one question and one person: 1, 0, or null (unresolved or void).
+  function outcomeOf(q, res, doc) {
+    if (q.kind === 'personal') {
+      const v = doc.po && doc.po['q' + q.id];
+      return (v === 0 || v === 1) ? v : null;
+    }
+    const r = res['q' + q.id];
+    if (!r) return null;
+    return (r.outcome === 0 || r.outcome === 1) ? r.outcome : null;
+  }
+
+  function items(doc, res, questions) {
+    const out = [];
+    for (const q of questions) {
+      if (q.kind === 'meta') continue;
+      const o = outcomeOf(q, res, doc);
+      if (o === null) continue;
+      const p = prob(doc.p && doc.p['q' + q.id]);
+      out.push({ id: q.id, kind: q.kind, p, o, penalty: (p - o) * (p - o) });
+    }
+    return out;
+  }
+
+  function cmp(a, b) {
+    if (a.brier === null && b.brier === null) return 0;
+    if (a.brier === null) return 1;
+    if (b.brier === null) return -1;
+    if (Math.abs(a.brier - b.brier) > 1e-12) return a.brier - b.brier;
+    if (Math.abs(a.log - b.log) > 1e-12) return a.log - b.log;
+    if (Math.abs(a.peer - b.peer) > 1e-12) return b.peer - a.peer;
+    return 0;
+  }
+
+  // docs: [{uid, name, p, po}]  res: {q12: {outcome: 1|0|'void'}}
+  function standings(docs, res, questions) {
+    const scored = questions.filter(q => q.kind !== 'meta');
+    const publicQs = scored.filter(q => q.kind !== 'personal');
+    const resolvedPublic = publicQs.filter(q => {
+      const r = res['q' + q.id]; return r && (r.outcome === 0 || r.outcome === 1);
+    });
+    const rows = docs.map((d, i) => {
+      const its = items(d, res, questions);
+      const n = its.length;
+      const brier = n ? its.reduce((s, x) => s + x.penalty, 0) / n : null;
+      const log = n ? its.reduce((s, x) => s - logS(x.p, x.o), 0) / n : null;
+      let peer = 0;
+      if (docs.length > 1) {
+        for (const q of resolvedPublic) {
+          const o = res['q' + q.id].outcome;
+          const mine = logS(prob(d.p && d.p['q' + q.id]), o);
+          let sum = 0;
+          docs.forEach((e, j) => { if (j !== i) sum += logS(prob(e.p && e.p['q' + q.id]), o); });
+          peer += mine - sum / (docs.length - 1);
+        }
+      }
+      return {
+        uid: d.uid, name: d.name || 'Unnamed', n,
+        nPersonal: its.filter(x => x.kind === 'personal').length,
+        brier, log, peer, items: its
+      };
+    });
+    rows.sort(cmp);
+    rows.forEach((r, i) => { r.rank = (i > 0 && cmp(rows[i - 1], r) === 0) ? rows[i - 1].rank : i + 1; });
+    return { rows, resolvedPublic: resolvedPublic.length, totalPublic: publicQs.length };
+  }
+
+  // Final meta outcomes. Assumptions (also shown in the organizer panel):
+  //  top half = rank <= N/2; bottom 3 = rank > N-3;
+  //  "beats the group average" compares Brier on resolved non-personal questions
+  //  against the Brier of the mean forecast on those same questions.
+  function metaOutcomes(st, docs, res, questions) {
+    const N = st.rows.length;
+    const byUid = new Map(docs.map(d => [d.uid, d]));
+    const pub = questions.filter(q => q.kind !== 'meta' && q.kind !== 'personal' && outcomeOf(q, res, {}) !== null);
+    const crowd = {};
+    pub.forEach(q => {
+      crowd[q.id] = docs.reduce((s, d) => s + prob(d.p && d.p['q' + q.id]), 0) / docs.length;
+    });
+    const metaQs = questions.filter(q => q.kind === 'meta');
+    return st.rows.map(r => {
+      const d = byUid.get(r.uid);
+      let mine = 0, grp = 0;
+      for (const q of pub) {
+        const o = outcomeOf(q, res, {});
+        mine += Math.pow(prob(d.p && d.p['q' + q.id]) - o, 2);
+        grp += Math.pow(crowd[q.id] - o, 2);
+      }
+      const out = {
+        q94: r.rank <= N / 2 ? 1 : 0,
+        q95: r.items.some(x => x.p >= 0.85 && x.o === 0) ? 1 : 0,
+        q96: r.items.some(x => x.p <= 0.15 && x.o === 1) ? 1 : 0,
+        q97: (r.brier !== null && r.brier < 0.25) ? 1 : 0,
+        q98: (pub.length > 0 && mine < grp) ? 1 : 0,
+        q99: r.rank === 1 ? 1 : 0,
+        q100: r.rank > N - 3 ? 1 : 0
+      };
+      const brier = metaQs.reduce((s, q) => s + Math.pow(prob(d.p && d.p['q' + q.id]) - out['q' + q.id], 2), 0) / metaQs.length;
+      return { uid: r.uid, name: r.name, rank: r.rank, outcomes: out, brier };
+    });
+  }
+
+  return { clip, prob, items, standings, metaOutcomes };
+})();
+
+
+const Backup = (function () {
+  // Builds the CSV that Drive converts into a Google Sheet.
+  // One row per participant: name, id, last saved, Q1..Q100 forecasts, then the
+  // outcomes each person reported for the personal questions.
+  // Text cells that start with = + - @ or a control character get a leading
+  // apostrophe so Sheets can never treat a participant's name as a formula.
+  const risky = /^[=+\-@\t\r]/;
+  function cell(v) {
+    if (v === null || v === undefined) return '';
+    let s = String(v);
+    if (typeof v === 'string' && risky.test(s)) s = "'" + s;
+    if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+  const line = a => a.map(cell).join(',');
+
+  function csv(questions, docs) {
+    const per = questions.filter(q => q.kind === 'personal');
+    const head = ['Name', 'User ID', 'Last saved']
+      .concat(questions.map(q => 'Q' + q.id), per.map(q => 'Outcome Q' + q.id));
+    const qrow = ['Question text', '', '']
+      .concat(questions.map(q => q.text), per.map(q => 'Outcome: ' + q.text));
+    const rows = docs.slice()
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+      .map(d => {
+        const p = d.p || {}, po = d.po || {};
+        return [String(d.name || ''), d.uid, d.updatedAt || '']
+          .concat(
+            questions.map(q => (typeof p['q' + q.id] === 'number' ? p['q' + q.id] : '')),
+            per.map(q => (po['q' + q.id] === 0 || po['q' + q.id] === 1 ? po['q' + q.id] : ''))
+          );
+      });
+    return [line(head), line(qrow)].concat(rows.map(line)).join('\n') + '\n';
+  }
+  return { csv, cell };
+})();
+
+
+const FormImport = (function () {
+  // Reads the CSV downloaded from the Google Form's response sheet.
+  // Question columns are recognised by their leading number ("12. Friedrich Merz ...").
+  function parseCsv(text) {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const rows = []; let row = [], cell = '', q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+        else cell += c;
+      } else if (c === '"') q = true;
+      else if (c === ',') { row.push(cell); cell = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        row.push(cell); rows.push(row); row = []; cell = '';
+      } else cell += c;
+    }
+    if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+
+  // Ids end up in public standings data, so they are a hash of the email, never the email itself.
+  const slug = s => {
+    s = String(s).toLowerCase().trim();
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36);
+  };
+
+  function parse(text, questions) {
+    const rows = parseCsv(text).filter(r => r.some(c => String(c).trim() !== ''));
+    if (rows.length < 2) return { error: 'The file has no responses.' };
+    const head = rows[0].map(s => String(s).trim());
+    const emailIx = head.findIndex(x => /^e-?mail( address)?$/i.test(x));
+    const nameIx = head.findIndex(x => /^name$/i.test(x));
+    const qIx = {};
+    head.forEach((x, i) => {
+      const m = /^(\d{1,3})\s*[.)]\s/.exec(x);
+      if (m && questions.some(q => q.id === +m[1])) qIx[+m[1]] = i;
+    });
+    const matched = Object.keys(qIx).length;
+    if (matched < Math.floor(questions.length / 2)) {
+      return { error: 'Found ' + matched + ' question columns, expected about ' + questions.length + '. Download the form’s response sheet as a CSV and try again.' };
+    }
+    if (emailIx < 0 && nameIx < 0) return { error: 'The file needs an Email Address or a Name column.' };
+
+    const byId = new Map(); let skippedRows = 0;
+    for (const r of rows.slice(1)) {
+      const email = emailIx >= 0 ? String(r[emailIx] || '').trim() : '';
+      const name = nameIx >= 0 ? String(r[nameIx] || '').trim() : '';
+      const key = email ? slug(email) : name ? 'n_' + slug(name) : '';
+      if (!key) { skippedRows++; continue; }
+      const p = {}, bad = [];
+      for (const id in qIx) {
+        const raw = String(r[qIx[id]] || '').trim();
+        if (raw === '') continue;
+        const m = /^(\d{1,2})\s*%?$/.exec(raw);
+        const v = m ? +m[1] : NaN;
+        if (v >= 1 && v <= 99) p['q' + id] = v; else bad.push(+id);
+      }
+      // a later row for the same person replaces an earlier one
+      byId.set('f_' + key, { id: 'f_' + key, name: name || email.split('@')[0] || key, email, p, answered: Object.keys(p).length, bad });
+    }
+    return { people: [...byId.values()], matched, skippedRows };
+  }
+  return { parseCsv, parse };
+})();
+
+
+</script>
+<script>
+(function () {
+'use strict';
+
+/* ---------- helpers ---------- */
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
+function h(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  if (props) for (const k in props) {
+    const v = props[k];
+    if (v == null || v === false) continue;
+    if (k === 'class') n.className = v;
+    else if (k === 'text') n.textContent = v;
+    else if (k.slice(0, 2) === 'on') n.addEventListener(k.slice(2), v);
+    else if (v === true) n.setAttribute(k, '');
+    else n.setAttribute(k, v);
+  }
+  for (const c of kids.flat(Infinity)) {
+    if (c == null || c === false) continue;
+    n.append(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  return n;
+}
+const clone = o => JSON.parse(JSON.stringify(o));
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const whenLabel = ym => { const a = ym.split('-'); return MONTHS[+a[1] - 1] + ' ' + a[0]; };
+const fmt3 = x => x == null ? '—' : x.toFixed(3);
+const fmtSigned = x => x == null ? '—' : (x > 0 ? '+' : x < 0 ? '−' : '') + Math.abs(x).toFixed(3);
+const today = () => new Date().toISOString().slice(0, 10);
+const errMsg = e => (e && (e.message || e.code)) || String(e);
+const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : null;
+const QBY = Object.fromEntries(QUESTIONS.map(q => [q.id, q]));
+const shown = q => q.kind === 'public' || q.kind === 'dept';
+const fmtDate = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); };
+let toastT;
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 4500); }
+
+/* ---------- state ---------- */
+const DEFAULT_CONFIG = { phase: 'open', deadline: '', personalReporting: false, crowdQids: [], formUrl: '' };
+const S = {
+  db: null, uid: null, isAdmin: false, canWrite: null, myName: '',
+  config: { ...DEFAULT_CONFIG },
+  mine: { name: '', p: {}, po: {} }, mineState: 'loading', // loading | ready | unavailable
+  resolutions: {}, leaderboard: null, meta: null, revealed: [],
+  admin: { forecasts: [], locked: [], loaded: false },
+  notes: {}, connected: false
+};
+const TABS = [['home', 'Home'], ['rules', 'Rules'], ['forecasts', 'Your Forecast'], ['standings', 'Standings'], ['crowd', 'Crowd'], ['organizer', 'Organizer']];
+let pendingBlank = false;
+// People who can't write to this page's database submit through the Google Form instead.
+const formMode = () => S.mineState === 'unavailable';
+// Static export: data is baked into the page (window.__STATIC__); no database, no sign-in, read-only.
+const STATIC = !!window.__STATIC__;
+
+/* ---------- masthead, tabs, banner ---------- */
+function visibleTabs() { return TABS.filter(t => STATIC ? !['forecasts', 'organizer'].includes(t[0]) : (t[0] !== 'organizer' || S.isAdmin)); }
+function currentTab() {
+  const t = location.hash.slice(1);
+  return visibleTabs().some(x => x[0] === t) ? t : 'home';
+}
+function renderTabs() {
+  const cur = currentTab();
+  $('#tabs').replaceChildren(...visibleTabs().map(t => h('a', { href: '#' + t[0], 'aria-current': t[0] === cur ? 'page' : null, text: t[1] })));
+}
+function route() {
+  const cur = currentTab();
+  TABS.forEach(t => { $('#v-' + t[0]).hidden = t[0] !== cur; });
+  renderTabs();
+  if (cur === 'home') renderHome();
+  if (cur === 'organizer') renderOrganizer();
+  window.scrollTo(0, 0);
+  if (pendingBlank && cur === 'forecasts') { pendingBlank = false; focusNextBlank(); }
+}
+function renderHeader() {
+  const c = S.config, el = $('#phase');
+  el.className = 'pill' + (c.phase === 'locked' ? ' locked' : c.phase === 'revealed' ? ' revealed' : '');
+  if (c.phase === 'open') el.textContent = c.deadline ? 'Open until ' + fmtDate(c.deadline) : 'Open for forecasts';
+  else if (c.phase === 'locked') el.textContent = 'Forecasts locked';
+  else el.textContent = 'Forecasts revealed';
+  renderTabs();
+}
+function updateBanner() {
+  const msg = S.notes.access || S.notes.conn || '';
+  const b = $('#banner'); b.textContent = msg; b.hidden = !msg;
+}
+
+/* ---------- home ---------- */
+function renderHome() {
+  const root = $('#v-home'); root.replaceChildren();
+  const c = S.config, n = answeredCount(), total = QUESTIONS.length, ready = S.mineState === 'ready';
+  const viaForm = formMode(), fu = safeUrl(c.formUrl);
+  const cta = viaForm ? 'Open the submission form' : !ready ? 'Open your forecast' : n === 0 ? 'Start your forecast' : n < total ? 'Continue your forecast (' + (total - n) + ' to go)' : 'Review your forecast';
+  const when = c.phase === 'locked' ? 'Submissions are closed.'
+    : c.phase === 'revealed' ? 'Submissions are closed and everyone’s forecasts are in the Crowd tab.'
+    : c.deadline ? 'Forecasts are due ' + fmtDate(c.deadline) + '.' : 'The organizer will announce the deadline.';
+  const facts = [['100', 'statements about 2027'], ['1–99%', 'probability you give each'], ['0.250', 'Brier score for answering 50% everywhere; lower is better']];
+  const steps = [
+    STATIC ? 'Everyone submitted a probability from 1% to 99% for each statement before the deadline.'
+    : formMode()
+      ? 'Fill in the Google Form with a probability from 1% to 99% for each statement. Plan on 30 to 45 minutes. You can edit your response until the deadline.'
+      : 'Enter a probability from 1% to 99% for each statement. Plan on 30 to 45 minutes. Answers save as you go, and you can change them until the deadline.',
+    'At the deadline, submissions lock and everyone’s forecasts are revealed in the Crowd tab.',
+    'Through 2027, statements resolve and the Standings tab updates with scores and a running log.',
+    'In January 2028, the personal and meta questions are settled and the final ranking is set.'
+  ];
+  root.append(
+    h('div', { class: 'card stack home-hero' },
+      h('h2', { text: 'How well can you call 2027?' }),
+      h('p', { class: 'lede', text: 'A forecasting contest for the department. Each of the 100 statements is about something that may or may not happen in 2027, from elections and markets to AI, sports, the department, and your own life. For every one, enter the probability that it turns out true. As the year goes on, statements resolve as true or false and your forecasts are scored for accuracy. The most accurate forecaster wins.' }),
+      h('div', { class: 'facts' }, facts.map(f => h('div', { class: 'fact' }, h('b', { text: f[0] }), h('span', { text: f[1] })))),
+      h('p', { class: 'muted', text: when }),
+      h('div', { class: 'row' },
+        STATIC ? null : viaForm
+          ? (fu ? h('a', { class: 'btn primary', href: fu, target: '_blank', rel: 'noopener noreferrer', text: cta })
+                : h('span', { class: 'muted', text: 'The submission form link will appear here once the organizer posts it.' }))
+          : h('a', { class: 'btn primary', href: '#forecasts', text: cta }),
+        h('a', { class: 'btn', href: '#rules', text: 'How scoring works' }))),
+    h('div', { class: 'card stack' },
+      h('h3', { text: 'How it works' }),
+      h('ol', { class: 'steps' }, steps.map(s => h('li', { text: s }))),
+      h('p', { class: 'muted small', text: 'Other participants can’t see your forecasts before the reveal. Your answers to the personal and meta questions are never shown to anyone else.' })));
+}
+
+/* ---------- forecast form ---------- */
+const ROWS = {};
+let saveTimer = null, saving = false, dirty = false;
+
+function setStatus(t) { const s = $('#save-status'); if (s) s.textContent = t; }
+
+function buildForecastView() {
+  const root = $('#v-forecasts');
+  const nameIn = h('input', { type: 'text', id: 'name', maxlength: 40, autocomplete: 'name', placeholder: 'e.g. Josh K.' });
+  nameIn.addEventListener('input', () => { S.mine.name = nameIn.value; scheduleSave(); });
+  const chips = h('div', { class: 'chips', id: 'sec-chips' }, SECTIONS.map(s =>
+    h('button', { type: 'button', class: 'chip', onclick: () => {
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      $('#sec-' + s.id).scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    } }, s.title, h('b', { id: 'chip-' + s.id, text: '0/0' }))));
+  root.append(
+    h('div', { class: 'card stack', id: 'form-mode', hidden: true },
+      h('h2', { text: 'Submit your forecasts' }),
+      h('p', { text: 'Forecasts for this challenge are collected in a Google Form. Fill it in once, and edit your response any time before the deadline.' }),
+      h('div', { id: 'form-link', class: 'row' })),
+    h('div', { class: 'card stack' },
+      h('h2', { text: 'Your Forecast' }),
+      h('p', { text: 'For each statement, enter the probability from 1% to 99% that it turns out true, by typing a number or dragging the slider. Answers save as you go. A blank answer is scored as 50%.' }),
+      h('div', { class: 'row' },
+        h('label', { for: 'name', class: 'muted small', text: 'Name shown in the standings' }), nameIn),
+      h('div', { class: 'row small muted' }, h('span', { id: 'save-status', 'aria-live': 'polite', text: 'Not saved yet' })),
+      chips),
+    h('div', { id: 'lock-note', class: 'note', hidden: true }));
+  for (const sec of SECTIONS) {
+    const qs = QUESTIONS.filter(q => q.sec === sec.id);
+    root.append(h('section', { class: 'sec', id: 'sec-' + sec.id },
+      h('div', { class: 'sec-head' }, h('h2', { text: sec.title }), h('span', { class: 'sec-count', id: 'cnt-' + sec.id })),
+      sec.note ? h('p', { class: 'sec-note', text: sec.note }) : null,
+      h('div', { class: 'sec-body' }, qs.map(qRow))));
+  }
+  updateProgress();
+}
+
+function qRow(q) {
+  const num = h('input', { type: 'number', id: 'p' + q.id, class: 'pin', min: 1, max: 99, step: 1, inputmode: 'numeric', placeholder: '—', 'aria-label': 'Probability in percent for question ' + q.id });
+  const sl = h('input', { type: 'range', id: 's' + q.id, min: 1, max: 99, step: 1, value: 50, class: 'unset', tabindex: '-1', 'aria-label': 'Slider for question ' + q.id });
+  num.addEventListener('input', () => {
+    const t = num.value.trim();
+    if (t === '') { num.classList.remove('bad'); setP(q.id, null, 'num'); return; }
+    const v = Math.round(Number(t));
+    if (isFinite(v) && v >= 1 && v <= 99) { num.classList.remove('bad'); setP(q.id, v, 'num'); } else num.classList.add('bad');
+  });
+  num.addEventListener('blur', () => {
+    if (num.classList.contains('bad')) {
+      const v = Math.min(99, Math.max(1, Math.round(Number(num.value)) || 50));
+      num.classList.remove('bad'); setP(q.id, v);
+    }
+  });
+  num.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const nx = $('#p' + (q.id + 1)); if (nx) { nx.focus(); nx.select(); nx.scrollIntoView({ block: 'center' }); }
+    }
+  });
+  sl.addEventListener('input', () => setP(q.id, Number(sl.value), 'slider'));
+  sl.addEventListener('click', () => { if (S.mine.p['q' + q.id] == null) setP(q.id, Number(sl.value), 'slider'); });
+
+  let po = null, poYes = null, poNo = null, poHint = null;
+  if (q.kind === 'personal') {
+    poYes = h('button', { type: 'button', class: 'chip', 'aria-pressed': 'false', text: 'It happened', onclick: () => setPO(q.id, S.mine.po['q' + q.id] === 1 ? null : 1) });
+    poNo = h('button', { type: 'button', class: 'chip', 'aria-pressed': 'false', text: 'It didn’t', onclick: () => setPO(q.id, S.mine.po['q' + q.id] === 0 ? null : 0) });
+    poHint = h('span', { text: '' });
+    po = h('div', { class: 'po', hidden: true }, h('span', { text: 'What happened?' }), poYes, poNo, poHint);
+  }
+  const row = h('div', { class: 'q', id: 'q' + q.id },
+    h('div', { class: 'qn', text: q.id }),
+    h('div', { class: 'qt' }, h('p', { text: q.text }), h('p', { class: 'qm', text: 'Resolves around ' + whenLabel(q.when) })),
+    h('label', { class: 'pct' }, num, h('span', { text: '%' })),
+    h('div', { class: 'qs' }, sl),
+    po);
+  ROWS[q.id] = { row, num, sl, po, poYes, poNo, poHint };
+  return row;
+}
+
+function paintRow(id, from) {
+  const r = ROWS[id], v = S.mine.p['q' + id];
+  if (from !== 'num') r.num.value = v == null ? '' : v;
+  if (from !== 'slider') r.sl.value = v == null ? 50 : v;
+  r.sl.classList.toggle('unset', v == null);
+  r.sl.style.setProperty('--fill', v == null ? '0%' : ((v - 1) / 98 * 100) + '%');
+  r.row.classList.toggle('done', v != null);
+}
+function setP(id, v, from) {
+  if (v == null) delete S.mine.p['q' + id]; else S.mine.p['q' + id] = v;
+  paintRow(id, from); updateProgress(); scheduleSave();
+}
+function setPO(id, v) {
+  if (v == null) delete S.mine.po['q' + id]; else S.mine.po['q' + id] = v;
+  paintPO(id); scheduleSave();
+}
+function paintPO(id) {
+  const r = ROWS[id], v = S.mine.po['q' + id];
+  r.poYes.setAttribute('aria-pressed', v === 1 ? 'true' : 'false');
+  r.poNo.setAttribute('aria-pressed', v === 0 ? 'true' : 'false');
+}
+function answeredCount(sec) {
+  return QUESTIONS.filter(q => (!sec || q.sec === sec) && S.mine.p['q' + q.id] != null).length;
+}
+function paintProgress(n) {
+  const box = $('#progress'), ready = S.mineState === 'ready';
+  box.hidden = !ready;
+  if (!ready) return;
+  const total = QUESTIONS.length, left = total - n, open = S.config.phase === 'open';
+  $('#barfill').style.width = (n / total * 100) + '%';
+  const bar = $('#bar'); bar.setAttribute('aria-valuenow', n); bar.classList.toggle('full', left === 0);
+  $('#ptext').replaceChildren(...(left === 0
+    ? ['All 100 forecasts entered']
+    : [h('b', { text: n }), ' of 100 entered · ', h('b', { text: left }), ' to go' + (open ? '' : ' (submissions closed)')]));
+  $('#pnext').hidden = left === 0 || !open;
+}
+function focusNextBlank() {
+  const q = QUESTIONS.find(x => S.mine.p['q' + x.id] == null);
+  if (!q) return;
+  const r = ROWS[q.id];
+  r.row.scrollIntoView({ block: 'center' });
+  if (!r.num.disabled) r.num.focus({ preventScroll: true });
+}
+function goNextBlank() {
+  if (currentTab() === 'forecasts') focusNextBlank();
+  else { pendingBlank = true; location.hash = 'forecasts'; }
+}
+function updateProgress() {
+  const n = answeredCount();
+  paintProgress(n);
+  for (const s of SECTIONS) {
+    const tot = QUESTIONS.filter(q => q.sec === s.id).length, a = answeredCount(s.id);
+    const c = $('#cnt-' + s.id); if (c) c.textContent = a + ' of ' + tot + ' answered';
+    const ch = $('#chip-' + s.id); if (ch) ch.textContent = a + '/' + tot;
+  }
+}
+function editable() { return S.mineState === 'ready' && S.config.phase === 'open' && !!S.uid && S.canWrite !== false; }
+function applyFormState() {
+  const ed = editable();
+  $('#name').disabled = !ed;
+  for (const id in ROWS) { ROWS[id].num.disabled = !ed; ROWS[id].sl.disabled = !ed; }
+  const c = S.config, note = $('#lock-note');
+  let msg = '';
+  if (S.mineState === 'loading') msg = 'Loading your saved forecasts…';
+  else if (S.mineState === 'unavailable') msg = 'Forecasts can’t be saved in this view.';
+  else if (c.phase === 'locked') msg = 'Submissions are locked. Your forecasts are final.';
+  else if (c.phase === 'revealed') msg = 'Submissions are locked and everyone’s forecasts are revealed in the Crowd tab.';
+  else if (c.deadline && Date.now() > Date.parse(c.deadline)) msg = 'The deadline has passed, but the organizer hasn’t locked submissions yet. Edits count until they do.';
+  note.textContent = msg; note.hidden = !msg;
+  const showPO = c.phase !== 'open';
+  for (const q of QUESTIONS) if (q.kind === 'personal') {
+    const r = ROWS[q.id];
+    r.po.hidden = !showPO;
+    r.poYes.disabled = r.poNo.disabled = !c.personalReporting || S.mineState !== 'ready';
+    r.poHint.textContent = c.personalReporting ? '' : 'Reporting opens in January 2028.';
+    paintPO(q.id);
+  }
+  const fm = formMode();
+  for (const el of $('#v-forecasts').children) {
+    if (el.id === 'form-mode') el.hidden = !fm;
+    else if (fm) el.hidden = true;
+    else if (el.id !== 'lock-note') el.hidden = false;
+  }
+  const fl = $('#form-link'), fu = safeUrl(S.config.formUrl);
+  if (fl) fl.replaceChildren(fu
+    ? h('a', { class: 'btn primary', href: fu, target: '_blank', rel: 'noopener noreferrer', text: 'Open the submission form' })
+    : h('span', { class: 'muted', text: 'The link will appear here once the organizer posts it.' }));
+  paintProgress(answeredCount());
+}
+function hydrateForm() {
+  $('#name').value = S.mine.name || '';
+  for (const q of QUESTIONS) paintRow(q.id);
+  updateProgress(); applyFormState();
+}
+
+/* autosave: one write at a time, coalesced */
+function scheduleSave() {
+  if (S.mineState !== 'ready') return;
+  dirty = true; setStatus('Saving…');
+  clearTimeout(saveTimer); saveTimer = setTimeout(flush, 700);
+}
+async function flush() {
+  if (saving || !dirty || S.mineState !== 'ready' || !S.db || !S.uid) return;
+  saving = true; dirty = false;
+  try {
+    await S.db.doc('forecasts/' + S.uid).set({ v: 1, name: (S.mine.name || '').trim(), p: S.mine.p, po: S.mine.po, updatedAt: new Date().toISOString() });
+    setStatus('Saved at ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
+  } catch (e) {
+    dirty = true; setStatus('Not saved: ' + errMsg(e) + '. Change an answer to try again.');
+  }
+  saving = false;
+  if (dirty && !String($('#save-status').textContent).startsWith('Not saved')) { clearTimeout(saveTimer); saveTimer = setTimeout(flush, 300); }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden && dirty) { clearTimeout(saveTimer); flush(); } });
+
+/* ---------- standings ---------- */
+function outChip(o) { return h('span', { class: 'out ' + (o === 1 ? 'yes' : o === 0 ? 'no' : 'void'), text: o === 1 ? 'YES' : o === 0 ? 'NO' : 'VOID' }); }
+
+function renderStandings() {
+  const root = $('#v-standings'); root.replaceChildren();
+  const lb = S.leaderboard;
+  const resolvedKeys = Object.keys(S.resolutions);
+
+  // leaderboard
+  const lbCard = h('div', { class: 'card stack' }, h('h2', { text: 'Standings' }));
+  if (lb && lb.rows && lb.rows.length) {
+    lbCard.append(h('p', { class: 'muted small', text: lb.resolvedPublic + ' of ' + lb.totalPublic + ' shared questions resolved' + (lb.updatedAt ? ' · updated ' + fmtDate(lb.updatedAt) : '') + '. Lower Brier score is better; 0.250 is what answering 50% everywhere earns.' }));
+    const rows = lb.rows.map(r => h('tr', { class: r.uid === S.uid ? 'me' : null },
+      h('td', { class: 'num', text: r.rank }),
+      h('td', { text: r.name + (r.uid === S.uid ? ' (you)' : '') }),
+      h('td', { class: 'num' }, fmt3(r.brier), r.brier == null ? null : h('span', { class: 'scale', 'aria-hidden': 'true' }, h('i', { style: 'left:' + Math.min(100, r.brier / 0.5 * 100) + '%' }))),
+      h('td', { class: 'num', text: fmtSigned(r.brier == null ? null : r.brier - 0.25) }),
+      h('td', { class: 'num', text: fmt3(r.log) }),
+      h('td', { class: 'num', text: r.peer == null ? '—' : (r.peer >= 0 ? '+' : '−') + Math.abs(r.peer).toFixed(2) }),
+      h('td', { class: 'num', text: r.n })));
+    lbCard.append(h('div', { class: 'tablewrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', { class: 'num', text: '#' }), h('th', { text: 'Name' }), h('th', { class: 'num', text: 'Brier' }), h('th', { class: 'num', text: 'vs 50%' }), h('th', { class: 'num', text: 'Log' }), h('th', { class: 'num', text: 'Peer' }), h('th', { class: 'num', text: 'Scored' }))),
+      h('tbody', null, rows))));
+    lbCard.append(h('p', { class: 'muted small', text: 'Log and peer scores only break ties. "Scored" counts the questions that have resolved for that person.' }));
+  } else {
+    const next = upcoming(1)[0];
+    lbCard.append(h('p', { text: resolvedKeys.length ? 'Standings appear once the organizer publishes them.' : 'Nothing has resolved yet, so there are no standings.' }));
+    if (next) lbCard.append(h('p', { class: 'muted', text: 'First up: question ' + next.id + ' (around ' + whenLabel(next.when) + ').' }));
+  }
+  root.append(lbCard);
+
+  // meta
+  if (S.meta && S.meta.rows && S.meta.rows.length) {
+    const head = h('tr', null, h('th', { text: 'Name' }), ...[94, 95, 96, 97, 98, 99, 100].map(i => h('th', { class: 'num', text: 'Q' + i })), h('th', { class: 'num', text: 'Meta Brier' }));
+    root.append(h('div', { class: 'card stack' }, h('h2', { text: 'Meta questions' }),
+      h('p', { class: 'muted small', text: 'Final outcomes of the meta questions, per person. Meta questions do not affect the ranking.' }),
+      h('div', { class: 'tablewrap' }, h('table', null, h('thead', null, head),
+        h('tbody', null, S.meta.rows.map(r => h('tr', { class: r.uid === S.uid ? 'me' : null }, h('td', { text: r.name }),
+          ...[94, 95, 96, 97, 98, 99, 100].map(i => h('td', { class: 'num', text: r.outcomes['q' + i] === 1 ? 'Yes' : 'No' })),
+          h('td', { class: 'num', text: fmt3(r.brier) }))))))));
+  }
+
+  // your results
+  const mine = S.mineState === 'ready' ? Scoring.items({ p: S.mine.p, po: S.mine.po }, S.resolutions, QUESTIONS) : [];
+  const mineCard = h('div', { class: 'card stack' }, h('h2', { text: 'Your resolved questions' }));
+  if (mine.length) {
+    const avg = mine.reduce((s, x) => s + x.penalty, 0) / mine.length;
+    mineCard.append(h('p', { class: 'muted small', text: 'Your Brier score so far: ' + fmt3(avg) + ' over ' + mine.length + ' questions.' }));
+    mineCard.append(h('div', { class: 'list' }, mine.map(x => h('div', { class: 'item' },
+      h('div', { class: 'qn', text: x.id }),
+      h('div', null, h('p', { text: QBY[x.id].text }), h('p', { class: 'meta', text: 'You said ' + Math.round(x.p * 100) + '% · penalty ' + x.penalty.toFixed(3) })),
+      outChip(x.o)))));
+  } else mineCard.append(h('p', { class: 'muted', text: 'Questions you answered will show up here as they resolve.' }));
+  if (S.mineState !== 'unavailable') root.append(mineCard);
+
+  // resolution log
+  const entries = resolvedKeys.map(k => ({ id: +k.slice(1), ...S.resolutions[k] })).filter(e => QBY[e.id]).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const logCard = h('div', { class: 'card stack' }, h('h2', { text: 'Resolution log' }));
+  if (entries.length) {
+    logCard.append(h('div', { class: 'list' }, entries.map(e => {
+      const u = safeUrl(e.source);
+      return h('div', { class: 'item' }, h('div', { class: 'qn', text: e.id }),
+        h('div', null, h('p', { text: QBY[e.id].text }),
+          h('p', { class: 'meta' }, (e.date || '') + (e.note ? ' · ' + e.note : ''), u ? ' · ' : null, u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer', text: 'source' }) : null)),
+        outChip(e.outcome));
+    })));
+  } else logCard.append(h('p', { class: 'muted', text: 'No resolutions logged yet.' }));
+  root.append(logCard);
+
+  // coming up
+  const up = upcoming(8);
+  if (up.length) root.append(h('div', { class: 'card stack' }, h('h2', { text: 'Resolving next' }),
+    h('p', { class: 'muted small', text: 'Approximate timing, in order. Most questions resolve at the end of 2027.' }),
+    h('div', { class: 'list' }, up.map(q => h('div', { class: 'item' }, h('div', { class: 'qn', text: q.id }), h('p', { text: q.text }), h('span', { class: 'muted small', text: whenLabel(q.when) }))))));
+}
+function upcoming(n) {
+  return QUESTIONS.filter(q => shown(q) && !S.resolutions['q' + q.id]).sort((a, b) => a.when.localeCompare(b.when) || a.id - b.id).slice(0, n);
+}
+
+/* ---------- crowd ---------- */
+const CROWD = { sec: 'all', sort: 'order' };
+function median(a) { const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
+function renderCrowd() {
+  const root = $('#v-crowd'); root.replaceChildren();
+  if (S.config.phase !== 'revealed' || !S.revealed.length) {
+    root.append(h('div', { class: 'card stack' }, h('h2', { text: 'Crowd' }),
+      h('p', { text: 'Everyone’s forecasts stay hidden until the organizer reveals them after the deadline.' }),
+      h('p', { class: 'muted', text: 'Once revealed, this tab shows the group average and each person’s answer for every shared question. Personal and meta questions are never shown.' })));
+    return;
+  }
+  const qids = (S.config.crowdQids && S.config.crowdQids.length ? S.config.crowdQids : QUESTIONS.filter(shown).map(q => q.id)).filter(i => QBY[i]);
+  const stats = qids.map(id => {
+    const entries = S.revealed.map(d => ({ uid: d.uid, name: d.name || 'Anonymous', v: d.p && d.p['q' + id] })).filter(e => typeof e.v === 'number');
+    const vals = entries.map(e => e.v);
+    const mean = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    const sd = vals.length ? Math.sqrt(vals.reduce((a, b) => a + (b - mean) * (b - mean), 0) / vals.length) : 0;
+    return { q: QBY[id], entries, mean, med: vals.length ? median(vals) : null, sd };
+  });
+  const secChips = [['all', 'All']].concat(SECTIONS.filter(s => s.kind === 'public' || (s.kind === 'dept' && qids.some(i => QBY[i].sec === 'dept'))).map(s => [s.id, s.title]));
+  const sorts = [['order', 'Question order'], ['spread', 'Most disagreement'], ['confident', 'Most one-sided']];
+  const listEl = h('div', { class: 'sec-body' });
+  const draw = () => {
+    let rows = stats.filter(s => CROWD.sec === 'all' || s.q.sec === CROWD.sec);
+    if (CROWD.sort === 'spread') rows = rows.slice().sort((a, b) => b.sd - a.sd);
+    else if (CROWD.sort === 'confident') rows = rows.slice().sort((a, b) => Math.abs((b.mean ?? 50) - 50) - Math.abs((a.mean ?? 50) - 50));
+    listEl.replaceChildren(...rows.map(cqRow));
+  };
+  const chipRow = (items, key) => h('div', { class: 'chips' }, items.map(it => {
+    const b = h('button', { type: 'button', class: 'chip', 'aria-pressed': CROWD[key] === it[0] ? 'true' : 'false', text: it[1], onclick: () => {
+      CROWD[key] = it[0]; $$('button', b.parentNode).forEach(x => x.setAttribute('aria-pressed', 'false')); b.setAttribute('aria-pressed', 'true'); draw();
+    } });
+    return b;
+  }));
+  root.append(h('div', { class: 'card stack' }, h('h2', { text: 'Crowd' }),
+    h('p', { class: 'muted small', text: S.revealed.length + ' people. The bar marks the group average; each dot is one person' + (S.uid ? ', and the outlined dot is you.' : '.') }),
+    chipRow(secChips, 'sec'), chipRow(sorts, 'sort')), listEl);
+  draw();
+}
+function cqRow(s) {
+  const r = S.resolutions['q' + s.q.id];
+  const strip = h('div', { class: 'strip', 'aria-hidden': 'true' }, s.entries.map(e => h('div', { class: 'dot' + (e.uid === S.uid ? ' me' : ''), style: 'left:' + e.v + '%' })));
+  if (s.mean != null) strip.append(h('div', { class: 'mean', style: 'left:' + s.mean + '%' }));
+  const sorted = s.entries.slice().sort((a, b) => b.v - a.v || a.name.localeCompare(b.name));
+  return h('details', { class: 'cq' },
+    h('summary', null,
+      h('div', { class: 'qn', text: s.q.id }),
+      h('div', null, h('p', { text: s.q.text }), r ? h('p', { class: 'qm' }, 'Resolved ', outChip(r.outcome)) : null),
+      h('div', { class: 'stats' }, s.mean == null ? 'no forecasts' : [h('b', { text: Math.round(s.mean) + '%' }), h('br'), 'median ' + Math.round(s.med)]),
+      strip),
+    h('div', { class: 'who-list' }, sorted.map(e => h('div', { class: e.uid === S.uid ? 'me' : null }, h('span', { text: e.name + (e.uid === S.uid ? ' (you)' : '') }), h('b', { text: e.v + '%' })))));
+}
+
+/* ---------- rules ---------- */
+function renderRules() {
+  const root = $('#v-rules');
+  if (!root.dataset.built) {
+    root.dataset.built = '1';
+    const d = h('div', { class: 'card prose' });
+    d.innerHTML = [
+      '<h2>How scoring works</h2>',
+      '<p>Each question asks for a probability between 1% and 99% that the proposition resolves YES. Forecasts outside that range are clipped to the nearest bound. Every question needs a forecast; a missing forecast is scored as 50%.</p>',
+      '<p>For each question, take the difference between your forecast (as a decimal) and the outcome (1 if YES, 0 if NO), and square it. Your <b>Brier score</b> is the average of those squared differences across all scored questions. <b>Lower is better.</b> 0 is perfect, and answering 50% on everything scores exactly 0.25, which is the benchmark for beating chance.</p>',
+      '<div class="formula">Brier = average of (forecast − outcome)²</div>',
+      '<h3>Three examples</h3>',
+      '<ul><li>You say 90% and it happens: (0.90 − 1)² = 0.01. If it doesn’t happen: (0.90 − 0)² = 0.81.</li>',
+      '<li>You say 60% and it happens: (0.60 − 1)² = 0.16. If it doesn’t: (0.60 − 0)² = 0.36.</li>',
+      '<li>Three questions with forecasts of 80%, 30% and 95%, and outcomes YES, NO, NO: 0.04, 0.09 and 0.9025 average to about 0.34. One overconfident miss outweighed two decent forecasts, by design.</li></ul>',
+      '<h3>Why squares</h3>',
+      '<p>Squaring makes penalties grow faster than errors do. Being a little wrong is cheap, and being very wrong is expensive. Missing by 0.2 costs 0.04, but missing by 0.4 costs 0.16, four times as much for twice the error. Confidence should be earned: if you truly believe something is 90% likely, say 90%.</p>',
+      '<div class="tablewrap"><table><thead><tr><th>Size of miss</th><th>Example</th><th class="num">Penalty</th></tr></thead><tbody>',
+      '<tr><td>Small</td><td>60% on something that happens</td><td class="num">0.16</td></tr>',
+      '<tr><td>Medium</td><td>70% on something that doesn’t happen</td><td class="num">0.49</td></tr>',
+      '<tr><td>Large</td><td>90% on something that doesn’t happen</td><td class="num">0.81</td></tr>',
+      '<tr><td>Huge</td><td>99% on something that doesn’t happen</td><td class="num">0.98</td></tr></tbody></table></div>',
+      '<p>Brier is also honest by design: your expected score is best when you report your true belief. Shading toward 50% to play it safe, or toward the extremes to look bold, both hurt you on average. Below 0.20 is solid on hard questions, and below 0.15 is excellent.</p>',
+      '<h3>Scope</h3>',
+      '<p>Rankings and the meta questions (94 to 100) are judged on questions 1 to 93 only. Meta questions are resolved after everything else is scored and are not part of the ranking. A question that resolves ambiguously, or whose resolution source ceases to exist, is voided and dropped for everyone. A question whose outcome is already determined when forecasts are submitted is voided.</p>',
+      '<h3>Resolution</h3>',
+      '<p>Each question resolves according to the source named in it, as of the stated date, or Dec 31, 2027 if none is given. Personal questions are answered by each participant about themselves and resolved on the honor system. Department questions refer to the department roster as of Jan 1, 2027. Disputes are settled by the organizer, whose decision is final.</p>',
+      '<h3>Timing</h3>',
+      '<p>Forecasts are due <b id="rules-deadline">by the deadline the organizer sets</b> and are locked once the organizer closes submissions. Forecasts are revealed to all participants after the deadline. Scoring takes place in January 2028, or once all questions have resolved.</p>',
+      '<h3>Tiebreakers (don’t sweat this part)</h3>',
+      '<p>Brier is the only score that decides the ranking. If two people tie, the log score breaks the tie (the average of −ln of the probability you assigned to what actually happened, which punishes confident misses more heavily), and then the peer score (how much better you did on each question than the group average, summed). You don’t need to understand or optimize for these. Forecast honestly and let the Brier score do its job.</p>'
+    ].join('');
+    root.append(d);
+  }
+  const c = S.config;
+  $('#rules-deadline', root).textContent = c.deadline ? fmtDate(c.deadline) : 'by the deadline the organizer sets';
+}
+
+/* ---------- organizer ---------- */
+function confirmBtn(label, confirmLabel, onGo, cls) {
+  let armed = false, t;
+  const b = h('button', { type: 'button', class: cls || 'btn', text: label });
+  b.addEventListener('click', async () => {
+    if (!armed) { armed = true; b.textContent = confirmLabel; t = setTimeout(() => { armed = false; b.textContent = label; }, 5000); return; }
+    clearTimeout(t); armed = false; b.disabled = true; b.textContent = 'Working…';
+    try { await onGo(); } catch (e) { toast('Failed: ' + errMsg(e)); }
+    b.disabled = false; b.textContent = label;
+  });
+  return b;
+}
+async function adminLoad() {
+  const [f, l] = await Promise.all([S.db.collection('forecasts').get(), S.db.collection('locked').get()]);
+  S.admin.forecasts = f.docs.map(d => ({ uid: d.id, ...clone(d.data()) }));
+  S.admin.locked = l.docs.map(d => ({ uid: d.id, ...clone(d.data()) }));
+  S.admin.loaded = true;
+}
+async function saveConfig(patch) {
+  const next = { ...S.config, ...patch };
+  await S.db.doc('config/main').set(next);
+  S.config = next; renderHeader(); applyFormState(); renderHome(); renderCrowd(); renderRules();
+}
+function scoringDocs() {
+  const live = new Map(S.admin.forecasts.map(d => [d.uid, d]));
+  const base = S.config.phase === 'open' ? S.admin.forecasts : S.admin.locked;
+  return base.map(d => ({ uid: d.uid, name: d.name || 'Unnamed', p: d.p || {}, po: (live.get(d.uid) && live.get(d.uid).po) || d.po || {} }));
+}
+async function publishLeaderboard() {
+  await adminLoad();
+  const docs = scoringDocs();
+  if (!docs.length) throw new Error('No forecasts to score yet.');
+  const st = Scoring.standings(docs, S.resolutions, QUESTIONS);
+  const rows = st.rows.map(r => ({ uid: r.uid, name: r.name, rank: r.rank, brier: r.brier, log: r.log, peer: r.peer, n: r.n }));
+  await S.db.doc('public/leaderboard').set({ rows, resolvedPublic: st.resolvedPublic, totalPublic: st.totalPublic, updatedAt: new Date().toISOString(), basis: S.config.phase === 'open' ? 'live' : 'locked' });
+}
+async function lockForecasts() {
+  await adminLoad();
+  const now = new Date().toISOString();
+  for (const d of S.admin.forecasts) await S.db.doc('locked/' + d.uid).set({ name: d.name || '', p: d.p || {}, lockedAt: now });
+  await saveConfig({ phase: 'locked', lockedAt: now });
+  await adminLoad(); renderOrganizer(); toast('Locked ' + S.admin.forecasts.length + ' forecast sets.');
+}
+async function revealForecasts(includeDept) {
+  await adminLoad();
+  const qids = QUESTIONS.filter(q => q.kind === 'public' || (q.kind === 'dept' && includeDept)).map(q => q.id);
+  const keep = new Set(qids.map(i => 'q' + i));
+  for (const d of S.admin.locked) {
+    const p = {}; for (const k in (d.p || {})) if (keep.has(k)) p[k] = d.p[k];
+    await S.db.doc('revealed/' + d.uid).set({ name: d.name || 'Anonymous', p });
+  }
+  await saveConfig({ phase: 'revealed', crowdQids: qids, revealedAt: new Date().toISOString() });
+  renderOrganizer(); toast('Forecasts revealed.');
+}
+
+function card(title, ...kids) { return h('div', { class: 'card stack' }, title ? h('h2', { text: title }) : null, ...kids); }
+
+async function renderOrganizer() {
+  const root = $('#v-organizer'); root.replaceChildren();
+  if (!S.isAdmin) { root.append(card('Organizer', h('p', { text: 'Organizer tools are only available to the page owner.' }))); return; }
+  if (!S.db) { root.append(card('Organizer', h('p', { text: 'The database isn’t reachable in this view.' }))); return; }
+  if (!S.admin.loaded) {
+    root.append(card('Organizer', h('p', { class: 'muted', text: 'Loading participants…' })));
+    try { await adminLoad(); } catch (e) { root.replaceChildren(card('Organizer', h('p', { text: 'Couldn’t load participants: ' + errMsg(e) }))); return; }
+    root.replaceChildren();
+  }
+  const c = S.config;
+  const lockedUids = new Set(S.admin.locked.map(d => d.uid));
+
+  /* phase */
+  const dl = h('input', { type: 'datetime-local', id: 'deadline', value: c.deadline || '' });
+  const phaseCard = card('Phase and deadline',
+    h('p', { text: c.phase === 'open' ? 'Submissions are open. Participants can edit until you lock them.' : c.phase === 'locked' ? 'Submissions are locked and a snapshot is saved. Scoring uses the snapshot.' : 'Forecasts are revealed in the Crowd tab.' }),
+    h('div', { class: 'row' }, h('label', { for: 'deadline', class: 'small muted', text: 'Deadline' }), dl,
+      h('button', { type: 'button', class: 'btn', text: 'Save deadline', onclick: async () => { try { await saveConfig({ deadline: dl.value }); toast('Deadline saved.'); } catch (e) { toast('Failed: ' + errMsg(e)); } } })));
+  if (c.phase === 'open') {
+    phaseCard.append(h('div', { class: 'row' }, confirmBtn('Lock submissions', 'Click again to lock and snapshot', lockForecasts, 'btn primary'),
+      h('span', { class: 'small muted', text: 'Copies every saved forecast set into a private snapshot.' })));
+  }
+  if (c.phase === 'locked') {
+    const dept = h('input', { type: 'checkbox', id: 'inc-dept', checked: true });
+    phaseCard.append(
+      h('div', { class: 'row' }, dept, h('label', { for: 'inc-dept', text: 'Include department questions in the crowd view' })),
+      h('div', { class: 'row' }, confirmBtn('Reveal forecasts', 'Click again to reveal to everyone', () => revealForecasts(dept.checked), 'btn primary'),
+        confirmBtn('Reopen submissions', 'Click again to reopen', async () => { await saveConfig({ phase: 'open' }); renderOrganizer(); toast('Submissions reopened. Lock again to refresh the snapshot.'); }, 'btn warn')),
+      h('p', { class: 'small muted', text: 'Personal and meta questions are never included in the reveal.' }));
+  }
+  if (c.phase !== 'open') {
+    phaseCard.append(h('div', { class: 'row' },
+      h('button', { type: 'button', class: 'btn', text: c.personalReporting ? 'Close personal reporting' : 'Open personal reporting', onclick: async () => { try { await saveConfig({ personalReporting: !c.personalReporting }); renderOrganizer(); } catch (e) { toast('Failed: ' + errMsg(e)); } } }),
+      h('span', { class: 'small muted', text: 'Lets each person report what happened on the personal questions. Open it in January 2028.' })));
+  }
+  root.append(phaseCard);
+
+  /* participants */
+  root.append(card('Participants (' + S.admin.forecasts.length + ')',
+    S.admin.forecasts.length ? h('div', { class: 'tablewrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', { text: 'Name' }), h('th', { class: 'num', text: 'Answered' }), h('th', { text: 'Last saved' }), h('th', { text: 'Snapshot' }))),
+      h('tbody', null, S.admin.forecasts.slice().sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(d => h('tr', null,
+        h('td', { text: d.name || '(no name)' }), h('td', { class: 'num', text: Object.keys(d.p || {}).length + ' / 100' }),
+        h('td', { text: d.updatedAt ? fmtDate(d.updatedAt) : '' }), h('td', { text: lockedUids.has(d.uid) ? 'Saved' : '—' })))))) : h('p', { class: 'muted', text: 'Nobody has saved forecasts yet.' }),
+    h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn', text: 'Refresh', onclick: async () => { try { await adminLoad(); renderOrganizer(); } catch (e) { toast('Failed: ' + errMsg(e)); } } }),
+      h('span', { class: 'small muted', text: 'Forecasts are only readable by editors. They are not displayed here.' }))));
+
+  /* form */
+  root.append(formCard(), importCard());
+
+  /* backup */
+  if (BK.ready) await BK.ready;
+  root.append(window.__HOSTED__ ? staticCard() : backupCard());
+
+  /* resolutions */
+  const search = h('input', { type: 'text', id: 'res-search', placeholder: 'Filter questions' });
+  const stateSel = h('select', { id: 'res-state', 'aria-label': 'Show' }, h('option', { value: 'all', text: 'All' }), h('option', { value: 'open', text: 'Unresolved' }), h('option', { value: 'done', text: 'Resolved' }));
+  const rowsWrap = h('div', null);
+  const rowEls = QUESTIONS.filter(shown).map(q => ({ q, el: resolveRow(q) }));
+  rowEls.forEach(r => rowsWrap.append(r.el));
+  const applyFilter = () => {
+    const t = search.value.trim().toLowerCase(), st = stateSel.value;
+    rowEls.forEach(r => {
+      const has = !!S.resolutions['q' + r.q.id];
+      r.el.hidden = (t && !(r.q.text.toLowerCase().includes(t) || String(r.q.id) === t)) || (st === 'open' && has) || (st === 'done' && !has);
+    });
+  };
+  search.addEventListener('input', applyFilter); stateSel.addEventListener('change', applyFilter);
+  root.append(card('Resolve questions',
+    h('p', { class: 'muted small', text: 'Choose an outcome and save. Standings are recomputed and published each time. Choose the blank option to clear a resolution.' }),
+    h('div', { class: 'row' }, search, stateSel,
+      confirmBtn('Republish standings', 'Click again to republish', async () => { await publishLeaderboard(); toast('Standings published.'); })),
+    rowsWrap));
+
+  /* meta */
+  const metaOut = h('div', { class: 'stack' });
+  root.append(card('Final meta results',
+    h('p', { class: 'muted small', text: 'Run this once everything else has resolved and personal outcomes are in. Assumptions: top half means rank at most half the field; bottom 3 means the last three ranks; “beats the group average” compares Brier on resolved shared questions against the Brier of the mean forecast on those questions.' }),
+    h('div', { class: 'row' },
+      h('button', { type: 'button', class: 'btn', text: 'Compute preview', onclick: async () => {
+        try {
+          await adminLoad(); const docs = scoringDocs(); if (!docs.length) throw new Error('No forecasts to score.');
+          const st = Scoring.standings(docs, S.resolutions, QUESTIONS);
+          const m = Scoring.metaOutcomes(st, docs, S.resolutions, QUESTIONS);
+          S.admin.metaPreview = m;
+          metaOut.replaceChildren(h('div', { class: 'tablewrap' }, h('table', null,
+            h('thead', null, h('tr', null, h('th', { text: 'Name' }), h('th', { class: 'num', text: 'Rank' }), ...[94, 95, 96, 97, 98, 99, 100].map(i => h('th', { class: 'num', text: 'Q' + i })), h('th', { class: 'num', text: 'Meta Brier' }))),
+            h('tbody', null, m.map(r => h('tr', null, h('td', { text: r.name }), h('td', { class: 'num', text: r.rank }), ...[94, 95, 96, 97, 98, 99, 100].map(i => h('td', { class: 'num', text: r.outcomes['q' + i] === 1 ? 'Yes' : 'No' })), h('td', { class: 'num', text: fmt3(r.brier) })))))));
+        } catch (e) { toast('Failed: ' + errMsg(e)); }
+      } }),
+      confirmBtn('Publish meta results', 'Click again to publish', async () => {
+        if (!S.admin.metaPreview) throw new Error('Compute the preview first.');
+        await S.db.doc('public/meta').set({ rows: S.admin.metaPreview.map(r => ({ uid: r.uid, name: r.name, outcomes: r.outcomes, brier: r.brier })), updatedAt: new Date().toISOString() });
+        toast('Meta results published.');
+      }, 'btn primary')),
+    metaOut));
+}
+
+function resolveRow(q) {
+  const r = S.resolutions['q' + q.id];
+  const sel = h('select', { id: 'res' + q.id, 'aria-label': 'Outcome for question ' + q.id },
+    h('option', { value: '', text: '— unresolved' }), h('option', { value: '1', text: 'Yes' }), h('option', { value: '0', text: 'No' }), h('option', { value: 'void', text: 'Void' }));
+  sel.value = r ? String(r.outcome) : '';
+  const date = h('input', { type: 'date', id: 'rd' + q.id, value: (r && r.date) || '', 'aria-label': 'Date resolved' });
+  const src = h('input', { type: 'url', id: 'rs' + q.id, value: (r && r.source) || '', placeholder: 'Source link', 'aria-label': 'Source link' });
+  const note = h('input', { type: 'text', class: 'note-in', id: 'rn' + q.id, value: (r && r.note) || '', placeholder: 'Note', 'aria-label': 'Note' });
+  const status = h('span', { class: 'small muted', text: r ? 'Saved' : '' });
+  const save = h('button', { type: 'button', class: 'btn', text: 'Save', onclick: async () => {
+    save.disabled = true; status.textContent = 'Saving…';
+    try {
+      const v = sel.value, ref = S.db.doc('resolutions/q' + q.id);
+      if (v === '') { await ref.delete(); delete S.resolutions['q' + q.id]; }
+      else {
+        const body = { outcome: v === 'void' ? 'void' : Number(v), date: date.value || today(), source: src.value.trim(), note: note.value.trim() };
+        await ref.set(body); S.resolutions['q' + q.id] = body; if (!date.value) date.value = body.date;
+      }
+      status.textContent = 'Saved. Updating standings…';
+      try { await publishLeaderboard(); status.textContent = 'Saved and published'; }
+      catch (e) { status.textContent = 'Saved. Standings not published: ' + errMsg(e); }
+      renderStandings();
+    } catch (e) { status.textContent = 'Failed: ' + errMsg(e); }
+    save.disabled = false;
+  } });
+  return h('div', { class: 'res-row' }, h('div', { class: 'qn', text: q.id }),
+    h('div', { class: 'stack' }, h('p', { text: q.text }), h('div', { class: 'fields' }, sel, date, src, note, save, status)));
+}
+
+function staticCard() {
+  const note = h('p', { class: 'small', id: 'st-status' });
+  const file = h('input', { type: 'file', id: 'st-load', accept: '.json,application/json' });
+  file.addEventListener('change', async () => {
+    const f = file.files && file.files[0]; if (!f) return;
+    try { const n = await window.__HOSTED__.importBackup(await f.text()); await adminLoad(); toast('Loaded backup (' + n + ' records).'); renderOrganizer(); }
+    catch (e) { note.textContent = 'Couldn’t load that file: ' + errMsg(e); }
+  });
+  return card('Publish to the website',
+    h('p', { text: 'The site everyone sees is built from one file, data.json. After you import responses, lock, reveal, or enter outcomes here, download a fresh data.json and replace the old one in your GitHub repository. Visitors see the change after the host refreshes, usually within a few minutes.' }),
+    h('div', { class: 'row' },
+      h('button', { type: 'button', class: 'btn primary', id: 'st-pub', text: 'Download data.json', onclick: () => { const n = window.__HOSTED__.exportPublic(); note.textContent = 'Downloaded data.json with ' + n + ' public records. It holds only what participants may see: standings, outcomes and revealed forecasts.'; } })),
+    h('p', { class: 'small muted', text: 'Your private working data (imported forecasts, locked snapshot) lives in this browser only. Save a backup file now and then, and keep it out of the repository.' }),
+    h('div', { class: 'row' },
+      h('button', { type: 'button', class: 'btn', id: 'st-bk', text: 'Save organizer backup', onclick: () => window.__HOSTED__.exportBackup() }),
+      h('label', { class: 'small', for: 'st-load', text: 'Load a backup:' }), file),
+    note);
+}
+
+
+/* ---------- Google Form link and response import (organizer only) ---------- */
+function formCard() {
+  const inp = h('input', { type: 'url', id: 'form-url', placeholder: 'https://forms.gle/…', value: S.config.formUrl || '' });
+  inp.style.flex = '1 1 280px';
+  return card('Submission form',
+    h('p', { text: 'People who can’t submit on this page use your Google Form. Paste the form’s link here and Home and Your Forecast will send them to it.' }),
+    h('div', { class: 'row' }, inp,
+      h('button', { type: 'button', class: 'btn', text: 'Save link', onclick: async () => {
+        const v = inp.value.trim();
+        if (v && !safeUrl(v)) { toast('Enter a link that starts with https://'); return; }
+        try { await saveConfig({ formUrl: v }); toast('Link saved.'); } catch (e) { toast('Failed: ' + errMsg(e)); }
+      } })));
+}
+function importCard() {
+  const have = S.admin.locked.filter(d => d.source === 'form').length;
+  const out = h('div', { class: 'stack' });
+  const file = h('input', { type: 'file', id: 'imp-file', accept: '.csv,text/csv' });
+  file.addEventListener('change', async () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    out.replaceChildren(h('p', { class: 'muted', text: 'Reading…' }));
+    let res;
+    try { res = FormImport.parse(await f.text(), QUESTIONS); } catch (e) { res = { error: 'Couldn’t read that file: ' + errMsg(e) }; }
+    if (res.error) { out.replaceChildren(h('p', { text: res.error })); return; }
+    const rows = res.people.map(p => h('tr', null, h('td', { text: p.name }), h('td', { text: p.email }),
+      h('td', { class: 'num', text: p.answered + ' / 100' }), h('td', { class: 'num', text: p.bad.length ? p.bad.length + ' outside 1–99' : '' })));
+    out.replaceChildren(
+      h('p', { text: res.people.length + ' participants found, with ' + res.matched + ' question columns.' }),
+      h('div', { class: 'tablewrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', { text: 'Name' }), h('th', { text: 'Email' }), h('th', { class: 'num', text: 'Answered' }), h('th', { class: 'num', text: 'Problems' }))),
+        h('tbody', null, rows))),
+      confirmBtn('Import ' + res.people.length + ' participants', 'Click again to import', async () => {
+        const now = new Date().toISOString();
+        for (const p of res.people) await S.db.doc('locked/' + p.id).set({ name: p.name, email: p.email, p: p.p, source: 'form', importedAt: now });
+        await adminLoad(); toast('Imported ' + res.people.length + ' participants.'); renderOrganizer();
+      }, 'btn primary'));
+  });
+  return card('Import form responses',
+    h('p', { text: 'In the form’s response sheet choose File, Download, Comma-separated values (.csv), then choose that file here. Do this before you lock submissions. Importing again replaces earlier imports for the same email.' }),
+    h('p', { class: 'small muted', text: 'Already imported: ' + have + '. Imported forecasts are private until you reveal them.' }),
+    file, out);
+}
+
+/* ---------- Drive backup (organizer only) ---------- */
+const BK = { ready: null, busy: false, timer: null, lastSig: '', lastAt: 0 };
+const BK_MIN_GAP = 15 * 60 * 1000;
+const BK_STOP = ['needs_reauth', 'server_not_connected', 'selection_required', 'approval_required', 'not_in_manifest', 'consent_required', 'blocked_by_policy', 'unavailable'];
+const sigOf = docs => docs.map(d => d.uid + ':' + (d.updatedAt || '')).sort().join('|');
+function stamp(d) {
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function bkText() {
+  const b = S.backup || {};
+  if (BK.busy) return 'Backing up…';
+  if (!b.lastAt) return 'No backup yet.';
+  return 'Last backup ' + new Date(b.lastAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ', with ' + (b.lastCount || 0) + ' participants.';
+}
+function setBk(msg) { const el = $('#bk-status'); if (el) el.textContent = msg || bkText(); }
+function bkError(e) {
+  switch (e && e.code) {
+    case 'needs_reauth': return 'Reconnect Google Drive in claude.ai Settings under Connectors, then try again.';
+    case 'server_not_connected': case 'selection_required': return 'Add Google Drive in claude.ai Settings under Connectors, then try again.';
+    case 'approval_required': case 'not_in_manifest': case 'consent_required': return 'Backups need your permission to use Google Drive. Click Back up now and choose Allow.';
+    case 'blocked_by_policy': return 'Your organization blocks this Google Drive action.';
+    case 'unavailable': return (e.message || 'Google Drive isn’t available in this view.') + ' Open the page in claude.ai while signed in.';
+    default: return 'Backup failed: ' + errMsg(e);
+  }
+}
+async function saveBk(patch) {
+  S.backup = { ...(S.backup || {}), ...patch };
+  await S.db.doc('admin/backup').set(S.backup);
+}
+async function runBackup(why) {
+  if (BK.busy || !S.db) return false;
+  BK.busy = true; setBk();
+  let ok = false;
+  try {
+    const mcp = window.claude ? await window.claude.use('mcp') : null;
+    if (!mcp) throw { code: 'unavailable', message: 'Google Drive isn’t available in this view.' };
+    const snap = await S.db.collection('forecasts').get();
+    const docs = snap.docs.map(d => ({ uid: d.id, ...clone(d.data()) }));
+    if (why === 'auto' && !docs.length) { BK.busy = false; setBk(); return false; }
+    const now = new Date();
+    const input = { title: 'Credence Challenge backup ' + stamp(now), contentMimeType: 'text/csv', textContent: Backup.csv(QUESTIONS, docs) };
+    if (S.backup && S.backup.folderId) input.parentId = S.backup.folderId;
+    await mcp.callTool('Google Drive', 'create_file', input, { cache: false });
+    BK.lastSig = sigOf(docs); BK.lastAt = now.getTime(); ok = true;
+    try { await saveBk({ lastAt: now.toISOString(), lastSig: BK.lastSig, lastCount: docs.length }); } catch (e) { /* the file exists; this note is cosmetic */ }
+    BK.busy = false; setBk();
+    if (why === 'manual') toast('Backed up ' + docs.length + ' participants to Google Drive.');
+  } catch (e) {
+    BK.busy = false;
+    const msg = bkError(e);
+    setBk(msg);
+    if (why === 'manual') toast(msg);
+    if (why === 'auto' && e && BK_STOP.includes(e.code)) {
+      try { await saveBk({ auto: false }); } catch (x) { /* ignore */ }
+      const box = $('#bk-auto'); if (box) box.checked = false;
+    }
+  }
+  BK.busy = false;
+  return ok;
+}
+function maybeAuto(docs) {
+  if (!(S.backup && S.backup.auto) || BK.timer) return;
+  if (!docs.length || sigOf(docs) === BK.lastSig) return;
+  const wait = Math.max(60000, BK.lastAt + BK_MIN_GAP - Date.now());
+  BK.timer = setTimeout(() => { BK.timer = null; runBackup('auto'); }, wait);
+}
+async function initBackup() {
+  try { const s = await S.db.doc('admin/backup').get(); S.backup = s.exists ? clone(s.data()) : {}; } catch (e) { S.backup = {}; }
+  BK.lastSig = S.backup.lastSig || '';
+  BK.lastAt = S.backup.lastAt ? Date.parse(S.backup.lastAt) : 0;
+  S.db.collection('forecasts').onSnapshot(snap => {
+    if (snap.metadata.fromCache) return;
+    maybeAuto(snap.docs.map(d => ({ uid: d.id, ...clone(d.data()) })));
+  }, () => { /* the participants table still loads on demand */ });
+}
+function backupCard() {
+  const b = S.backup || {};
+  const auto = h('input', { type: 'checkbox', id: 'bk-auto' });
+  auto.checked = !!b.auto;
+  auto.addEventListener('change', async () => {
+    const on = auto.checked;
+    try { await saveBk({ auto: on }); } catch (e) { toast('Failed: ' + errMsg(e)); auto.checked = !on; return; }
+    if (on) {
+      const ok = await runBackup('manual');
+      if (!ok) { auto.checked = false; try { await saveBk({ auto: false }); } catch (e) { /* ignore */ } }
+    } else { clearTimeout(BK.timer); BK.timer = null; }
+  });
+  const folder = b.folderId ? h('a', { href: 'https://drive.google.com/drive/folders/' + encodeURIComponent(b.folderId), target: '_blank', rel: 'noopener noreferrer', text: 'Open backup folder' }) : null;
+  return card('Backup to Google Drive',
+    h('p', { text: 'Saves every participant’s forecasts as a new Google Sheet in your Drive, one row per person. Each backup is its own file, so earlier ones are never overwritten. Participants never see this.' }),
+    h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn primary', text: 'Back up now', onclick: () => runBackup('manual') }), folder),
+    h('div', { class: 'row' }, auto, h('label', { for: 'bk-auto', text: 'Back up automatically while this page is open' })),
+    h('p', { class: 'small muted', text: 'Automatic backups run after forecasts change, at most once every 15 minutes, and only while this page is open in your browser. Use Back up now before you close it.' }),
+    h('p', { class: 'small', id: 'bk-status', text: bkText() }));
+}
+
+/* ---------- data wiring ---------- */
+function onData() {
+  renderHeader(); applyFormState(); renderHome(); renderStandings(); renderCrowd(); renderRules(); updateBanner();
+}
+function sub(ref, apply) {
+  return ref.onSnapshot(snap => {
+    if (!snap.metadata.fromCache) { S.connected = true; S.notes.conn = ''; }
+    apply(snap); onData();
+  }, e => { S.notes.conn = 'Live updates stopped (' + ((e && e.code) || 'error') + '). Reload the page to reconnect.'; updateBanner(); });
+}
+
+async function boot() {
+  buildForecastView(); renderHome(); renderRules(); renderStandings(); renderCrowd(); renderHeader();
+  $('#pnext').addEventListener('click', goNextBlank);
+  window.addEventListener('hashchange', route); route();
+  if (STATIC) {
+    const D = window.__STATIC__;
+    S.config = { ...DEFAULT_CONFIG, ...(D.config || {}), formUrl: '' };
+    S.resolutions = D.resolutions || {}; S.leaderboard = D.leaderboard || null; S.meta = D.meta || null; S.revealed = D.revealed || [];
+    S.mineState = 'unavailable'; S.connected = true;
+    renderTabs(); route(); renderHome(); renderRules(); renderStandings(); renderCrowd(); renderHeader();
+    return;
+  }
+  const cl = window.claude;
+  let db = null, user = null;
+  try { [db, user] = await Promise.all([cl ? cl.use('db') : null, cl ? cl.use('user') : null]); } catch (e) { /* fall through */ }
+  if (user) {
+    try {
+      S.uid = await user.id(); S.isAdmin = await user.isOwner(); S.canWrite = await user.can('data.write');
+      S.myName = ((await user.me()).name) || '';
+    } catch (e) { /* keep defaults */ }
+  }
+  renderTabs(); route();
+  S.db = db;
+  if (db && S.isAdmin && location.hash === '#organizer') route();
+  if (!db) {
+    S.mineState = 'unavailable';
+    S.notes.access = 'This view can’t reach the database, so forecasts can’t be saved here. Open the page from the shared link while signed in.';
+    onData(); return;
+  }
+  if (!S.uid || S.canWrite === false) S.mineState = 'unavailable';
+
+  setTimeout(() => { if (!S.connected) { S.notes.conn = 'Still trying to reach the database. Anything you enter will save when the connection returns.'; updateBanner(); } }, 10000);
+  sub(db.doc('config/main'), s => { S.config = { ...DEFAULT_CONFIG, ...(s.exists ? clone(s.data()) : {}) }; });
+  sub(db.collection('resolutions'), s => { S.resolutions = {}; s.docs.forEach(d => { S.resolutions[d.id] = clone(d.data()); }); });
+  sub(db.doc('public/leaderboard'), s => { S.leaderboard = s.exists ? clone(s.data()) : null; });
+  sub(db.doc('public/meta'), s => { S.meta = s.exists ? clone(s.data()) : null; });
+  sub(db.collection('revealed'), s => { S.revealed = s.docs.map(d => ({ uid: d.id, ...clone(d.data()) })); });
+  if (S.isAdmin && !window.__HOSTED__) BK.ready = initBackup();
+
+  if (S.uid && S.canWrite !== false) {
+    try {
+      const snap = await db.doc('forecasts/' + S.uid).get();
+      const d = snap.exists ? clone(snap.data()) : {};
+      S.mine = { name: d.name || S.myName || '', p: d.p || {}, po: d.po || {} };
+      S.mineState = 'ready';
+      hydrateForm(); renderStandings(); renderHome();
+    } catch (e) {
+      S.mineState = 'unavailable';
+      S.notes.access = 'Couldn’t load your saved forecasts (' + errMsg(e) + '). Editing is off so nothing gets overwritten. Reload to try again.';
+      applyFormState(); updateBanner();
+    }
+  } else { applyFormState(); updateBanner(); }
+}
+boot();
+})();
+</script>
+
+</body>
+</html>
