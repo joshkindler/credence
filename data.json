@@ -1,4 +1,12 @@
 {
- "generatedAt": "",
- "docs": {}
+ "generatedAt": "2026-11-13T14:12:36.734Z",
+ "docs": {
+  "config/main": {
+   "phase": "open",
+   "deadline": "2027-01-01T00:01",
+   "personalReporting": false,
+   "crowdQids": [],
+   "formUrl": "https://docs.google.com/forms/d/e/1FAIpQLSctshXEtGVs3sMyZlyLXx9C-uDJE-e3PTI1zBUUv816jxjaag/viewform"
+  }
+ }
 }
