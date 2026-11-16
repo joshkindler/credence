@@ -205,7 +205,18 @@ input:disabled, select:disabled { opacity: .6; }
 .pin::-webkit-outer-spin-button, .pin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .q.done .pin { border-style: solid; border-color: var(--line); }
 .pin.bad { border-color: var(--no); color: var(--no); }
-.qs { grid-area: s; padding-top: 4px; }
+.qs { grid-area: s; padding-top: 4px; container-type: inline-size; }
+/* verbal probability scale under each slider; positions follow the slider thumb */
+.lk { position: relative; height: 32px; margin-top: 1px; pointer-events: none; user-select: none; }
+.lk .tk { position: absolute; top: 0; left: calc(10px + (100% - 20px) * var(--f)); width: 66px; margin-left: -33px; display: flex; flex-direction: column; align-items: center; }
+.lk .tk i { width: 1px; height: 5px; background: var(--line); }
+.lk .tk b { margin-top: 2px; font: 400 10px/1.15 var(--font-body); color: var(--ink-2); text-align: center; opacity: .8; transition: color .15s, opacity .15s; }
+.lk .tk.minor b { display: none; }
+.lk .tk.on i { background: var(--accent); }
+.lk .tk.on b { color: var(--accent); opacity: 1; font-weight: 600; }
+.q:not(.done) .lk .tk.on i { background: var(--line); }
+.q:not(.done) .lk .tk.on b { color: var(--ink-2); opacity: .8; font-weight: 400; }
+@container (min-width: 520px) { .lk .tk.minor b { display: block; } .lk .tk { width: 62px; margin-left: -31px; } }
 .po { grid-area: o; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-top: 6px; font-size: 13px; color: var(--ink-2); }
 .po .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 
@@ -883,6 +894,17 @@ async function doSubmit() {
   } catch (e) { fail('Not submitted: ' + errMsg(e) + '. Your answers are still kept in this browser; try again in a minute.'); }
 }
 
+const LIKERT = [[10, 'Extremely unlikely', 1], [20, 'Very unlikely', 0], [30, 'Unlikely', 1], [40, 'Somewhat unlikely', 0], [50, 'Toss-up', 1], [60, 'Somewhat likely', 0], [70, 'Likely', 1], [80, 'Very likely', 0], [90, 'Extremely likely', 1]];
+function likertScale() {
+  return h('div', { class: 'lk', 'aria-hidden': 'true' }, LIKERT.map(l =>
+    h('span', { class: 'tk' + (l[2] ? '' : ' minor'), style: '--f:' + ((l[0] - 1) / 98), 'data-v': l[0] }, h('i'), h('b', { text: l[1] }))));
+}
+function paintLikert(r, v) {
+  let best = null;
+  if (v != null) for (const l of LIKERT) if (Math.abs(l[0] - v) <= 5 && (best === null || Math.abs(l[0] - v) < Math.abs(best - v))) best = l[0];
+  for (const el of r.lk.children) el.classList.toggle('on', best !== null && Number(el.dataset.v) === best);
+}
+
 function qRow(q) {
   const num = h('input', { type: 'number', id: 'p' + q.id, class: 'pin', min: 1, max: 99, step: 1, inputmode: 'numeric', placeholder: '—', 'aria-label': 'Probability in percent for question ' + q.id });
   const sl = h('input', { type: 'range', id: 's' + q.id, min: 1, max: 99, step: 1, value: 50, class: 'unset', tabindex: '-1', 'aria-label': 'Slider for question ' + q.id });
@@ -907,6 +929,7 @@ function qRow(q) {
   sl.addEventListener('input', () => setP(q.id, Number(sl.value), 'slider'));
   sl.addEventListener('click', () => { if (S.mine.p['q' + q.id] == null) setP(q.id, Number(sl.value), 'slider'); });
 
+  const lk = likertScale();
   let po = null, poYes = null, poNo = null, poHint = null;
   if (q.kind === 'personal') {
     poYes = h('button', { type: 'button', class: 'chip', 'aria-pressed': 'false', text: 'It happened', onclick: () => setPO(q.id, S.mine.po['q' + q.id] === 1 ? null : 1) });
@@ -918,9 +941,9 @@ function qRow(q) {
     h('div', { class: 'qn', text: q.id }),
     h('div', { class: 'qt' }, h('p', { text: q.text }), h('p', { class: 'qm', text: 'Resolves around ' + whenLabel(q.when) })),
     h('label', { class: 'pct' }, num, h('span', { text: '%' })),
-    h('div', { class: 'qs' }, sl),
+    h('div', { class: 'qs' }, sl, lk),
     po);
-  ROWS[q.id] = { row, num, sl, po, poYes, poNo, poHint };
+  ROWS[q.id] = { row, num, sl, lk, po, poYes, poNo, poHint };
   return row;
 }
 
@@ -931,6 +954,7 @@ function paintRow(id, from) {
   r.sl.classList.toggle('unset', v == null);
   r.sl.style.setProperty('--fill', v == null ? '0%' : ((v - 1) / 98 * 100) + '%');
   r.row.classList.toggle('done', v != null);
+  paintLikert(r, v);
 }
 function setP(id, v, from) {
   if (v == null) delete S.mine.p['q' + id]; else S.mine.p['q' + id] = v;
