@@ -1,12 +1,13 @@
 {
- "generatedAt": "2026-11-13T14:12:36.734Z",
+ "generatedAt": "2026-11-16T13:31:20.072Z",
  "docs": {
   "config/main": {
    "phase": "open",
    "deadline": "2027-01-01T00:01",
    "personalReporting": false,
    "crowdQids": [],
-   "formUrl": "https://docs.google.com/forms/d/e/1FAIpQLSctshXEtGVs3sMyZlyLXx9C-uDJE-e3PTI1zBUUv816jxjaag/viewform"
+   "formUrl": "https://docs.google.com/forms/u/0/d/e/1FAIpQLSctshXEtGVs3sMyZlyLXx9C-uDJE-e3PTI1zBUUv816jxjaag/formResponse",
+   "submitUrl": "https://script.google.com/macros/s/AKfycbxkh7RPN5wAK0nrH6GzCcndQTwBVN0oUSCOZNdCjeoANnZnyjitEKnQbXy_tJeyIW6s/exec"
   }
  }
 }
