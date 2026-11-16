@@ -86,7 +86,7 @@
 </script>
 </head>
 <body>
-<title>Credence Challenge</title>
+<title>Tufts Philosophy Department Credence Challenge</title>
 <meta name="robots" content="noindex">
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap">
@@ -208,15 +208,18 @@ input:disabled, select:disabled { opacity: .6; }
 .qs { grid-area: s; padding-top: 4px; container-type: inline-size; }
 /* verbal probability scale under each slider; positions follow the slider thumb */
 .lk { position: relative; height: 32px; margin-top: 1px; pointer-events: none; user-select: none; }
-.lk .tk { position: absolute; top: 0; left: calc(10px + (100% - 20px) * var(--f)); width: 66px; margin-left: -33px; display: flex; flex-direction: column; align-items: center; }
+.lk .tk { appearance: none; -webkit-appearance: none; background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; pointer-events: auto; position: absolute; top: 0; left: calc(10px + (100% - 20px) * var(--f)); width: 66px; margin-left: -33px; display: flex; flex-direction: column; align-items: center; }
 .lk .tk i { width: 1px; height: 5px; background: var(--line); }
 .lk .tk b { margin-top: 2px; font: 400 10px/1.15 var(--font-body); color: var(--ink-2); text-align: center; opacity: .8; transition: color .15s, opacity .15s; }
 .lk .tk.minor b { display: none; }
+.lk .tk.minor { pointer-events: none; }
+.lk .tk:hover b, .lk .tk:focus-visible b { color: var(--accent); opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
+.lk.off .tk { pointer-events: none; cursor: default; }
 .lk .tk.on i { background: var(--accent); }
 .lk .tk.on b { color: var(--accent); opacity: 1; font-weight: 600; }
 .q:not(.done) .lk .tk.on i { background: var(--line); }
 .q:not(.done) .lk .tk.on b { color: var(--ink-2); opacity: .8; font-weight: 400; }
-@container (min-width: 520px) { .lk .tk.minor b { display: block; } .lk .tk { width: 62px; margin-left: -31px; } }
+@container (min-width: 520px) { .lk .tk.minor b { display: block; } .lk .tk.minor { pointer-events: auto; } .lk.off .tk.minor { pointer-events: none; } .lk .tk { width: 62px; margin-left: -31px; } }
 .po { grid-area: o; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-top: 6px; font-size: 13px; color: var(--ink-2); }
 .po .chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 
@@ -251,7 +254,8 @@ tr.me td { background: var(--accent-soft); }
 .list { display: grid; gap: 0; }
 .item { display: grid; grid-template-columns: 2.1rem minmax(0, 1fr) auto; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); align-items: start; }
 .item:first-child { border-top: 0; }
-.item .qn { padding-top: 2px; }
+.item .qn { grid-area: auto; padding-top: 2px; }
+.item > p { min-width: 0; }
 .item .meta { font-size: 12px; color: var(--ink-2); margin-top: 2px; overflow-wrap: anywhere; }
 
 /* Crowd */
@@ -297,7 +301,7 @@ a.btn { text-decoration: none; display: inline-block; }
   <div class="wrap">
     <div class="top-row">
       <div class="brand">
-        <h1>Credence Challenge</h1>
+        <h1>Tufts Philosophy Department Credence Challenge</h1>
         <p>100 propositions about 2027. Give each a probability.</p>
       </div>
       <div class="top-right">
@@ -827,7 +831,7 @@ function setStatus(t) { const s = $('#save-status'); if (s) s.textContent = t; }
 
 function buildForecastView() {
   const root = $('#v-forecasts');
-  const nameIn = h('input', { type: 'text', id: 'name', maxlength: 40, autocomplete: 'name', placeholder: 'e.g. Josh K.' });
+  const nameIn = h('input', { type: 'text', id: 'name', maxlength: 40, autocomplete: 'name', placeholder: 'e.g. Sam R.' });
   nameIn.addEventListener('input', () => { S.mine.name = nameIn.value; scheduleSave(); });
   const chips = h('div', { class: 'chips', id: 'sec-chips' }, SECTIONS.map(s =>
     h('button', { type: 'button', class: 'chip', onclick: () => {
@@ -895,9 +899,12 @@ async function doSubmit() {
 }
 
 const LIKERT = [[10, 'Extremely unlikely', 1], [20, 'Very unlikely', 0], [30, 'Unlikely', 1], [40, 'Somewhat unlikely', 0], [50, 'Toss-up', 1], [60, 'Somewhat likely', 0], [70, 'Likely', 1], [80, 'Very likely', 0], [90, 'Extremely likely', 1]];
-function likertScale() {
-  return h('div', { class: 'lk', 'aria-hidden': 'true' }, LIKERT.map(l =>
-    h('span', { class: 'tk' + (l[2] ? '' : ' minor'), style: '--f:' + ((l[0] - 1) / 98), 'data-v': l[0] }, h('i'), h('b', { text: l[1] }))));
+function likertScale(qid) {
+  // Each label sets the answer to its value. Out of the tab order so keyboard entry keeps its flow.
+  return h('div', { class: 'lk' }, LIKERT.map(l =>
+    h('button', { type: 'button', class: 'tk' + (l[2] ? '' : ' minor'), style: '--f:' + ((l[0] - 1) / 98), 'data-v': l[0], tabindex: '-1',
+      'aria-label': 'Set question ' + qid + ' to ' + l[0] + '%: ' + l[1], onclick: () => { if (editable()) setP(qid, l[0]); } },
+      h('i'), h('b', { text: l[1] }))));
 }
 function paintLikert(r, v) {
   let best = null;
@@ -929,7 +936,7 @@ function qRow(q) {
   sl.addEventListener('input', () => setP(q.id, Number(sl.value), 'slider'));
   sl.addEventListener('click', () => { if (S.mine.p['q' + q.id] == null) setP(q.id, Number(sl.value), 'slider'); });
 
-  const lk = likertScale();
+  const lk = likertScale(q.id);
   let po = null, poYes = null, poNo = null, poHint = null;
   if (q.kind === 'personal') {
     poYes = h('button', { type: 'button', class: 'chip', 'aria-pressed': 'false', text: 'It happened', onclick: () => setPO(q.id, S.mine.po['q' + q.id] === 1 ? null : 1) });
@@ -1009,7 +1016,7 @@ function editable() { return S.mineState === 'ready' && S.config.phase === 'open
 function applyFormState() {
   const ed = editable();
   $('#name').disabled = !ed;
-  for (const id in ROWS) { ROWS[id].num.disabled = !ed; ROWS[id].sl.disabled = !ed; }
+  for (const id in ROWS) { ROWS[id].num.disabled = !ed; ROWS[id].sl.disabled = !ed; ROWS[id].lk.classList.toggle('off', !ed); }
   const c = S.config, note = $('#lock-note');
   let msg = '';
   if (S.mineState === 'loading') msg = 'Loading your saved forecasts…';
