@@ -1,0 +1,13 @@
+{
+ "generatedAt": "2026-11-16T13:20:43.290Z",
+ "docs": {
+  "config/main": {
+   "phase": "open",
+   "deadline": "2027-01-01T00:01",
+   "personalReporting": false,
+   "crowdQids": [],
+   "formUrl": "",
+   "submitUrl": "https://script.google.com/macros/s/AKfycbxkh7RPN5wAK0nrH6GzCcndQTwBVN0oUSCOZNdCjeoANnZnyjitEKnQbXy_tJeyIW6s/exec"
+  }
+ }
+}
