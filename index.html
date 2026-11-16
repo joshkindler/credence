@@ -10,6 +10,8 @@
 (function () {
   const ORG = /(^|[?&])organizer(=|&|$)/.test(location.search);
   const KEY = 'credence-organizer-v1';
+  const VKEY = 'credence-visitor-v1';
+  const DRAFT = 'forecasts/visitor';
   const PUBLIC = [/^config\//, /^resolutions\//, /^public\//, /^revealed\//];
   const store = new Map();
   const listeners = [];
@@ -18,17 +20,19 @@
   const snapDoc = p => { const d = store.get(p); return { id: p.split('/').pop(), exists: d !== undefined, data: () => clone(d), metadata: { fromCache: false, hasPendingWrites: false } }; };
   const docsOf = c => [...store.keys()].filter(p => p.startsWith(c + '/') && depth(p) === depth(c) + 1).sort().map(snapDoc);
   const qsnap = c => { const docs = docsOf(c); return { docs, size: docs.length, empty: !docs.length, docChanges: () => [], metadata: { fromCache: false } }; };
-  const persist = () => { if (!ORG) return; try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(store))); } catch (e) { /* storage unavailable */ } };
+  const persist = () => {
+    if (!ORG) { try { const d = store.get(DRAFT); if (d === undefined) localStorage.removeItem(VKEY); else localStorage.setItem(VKEY, JSON.stringify(d)); } catch (e) { /* storage unavailable */ } return; }
+    try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(store))); } catch (e) { /* storage unavailable */ } };
   const notify = () => listeners.slice().forEach(l => { try { l.fn(l.kind === 'doc' ? snapDoc(l.path) : qsnap(l.path)); } catch (e) { console.error(e); } });
-  const guard = () => { if (!ORG) throw { code: 'permission-denied', message: 'Only the organizer can change data on this site.' }; };
-  const write = (p, d) => { guard(); store.set(p, clone(d)); persist(); notify(); };
+  const guard = p => { if (!ORG && p === DRAFT) return; if (!ORG) throw { code: 'permission-denied', message: 'Only the organizer can change data on this site.' }; };
+  const write = (p, d) => { guard(p); store.set(p, clone(d)); persist(); notify(); };
 
   const db = {
     doc: p => ({ path: p, id: p.split('/').pop(),
       get: async () => snapDoc(p),
       set: async d => write(p, d),
       update: async d => write(p, { ...(store.get(p) || {}), ...d }),
-      delete: async () => { guard(); store.delete(p); persist(); notify(); },
+      delete: async () => { guard(p); store.delete(p); persist(); notify(); },
       onSnapshot: (fn) => { const l = { kind: 'doc', path: p, fn }; listeners.push(l); setTimeout(() => fn(snapDoc(p)), 0); return () => { const i = listeners.indexOf(l); if (i >= 0) listeners.splice(i, 1); }; } }),
     collection: c => ({ path: c,
       get: async () => qsnap(c),
@@ -37,7 +41,8 @@
   };
   const user = {
     id: async () => ORG ? 'organizer' : 'visitor',
-    canEdit: async () => ORG, isOwner: async () => ORG, can: async () => ORG,
+    canEdit: async () => ORG, isOwner: async () => ORG,
+    can: async () => ORG || !!(store.get('config/main') || {}).submitUrl,
     me: async () => ({ name: ORG ? 'Organizer' : '', id: ORG ? 'organizer' : 'visitor' })
   };
 
@@ -51,6 +56,7 @@
       } catch (e) { flat = null; }
     }
     for (const k in (flat || {})) store.set(k, flat[k]);
+    if (!ORG) { try { const raw = localStorage.getItem(VKEY); if (raw) store.set(DRAFT, JSON.parse(raw)); } catch (e) { /* ignore */ } }
   })();
 
   const download = (name, obj) => {
@@ -710,7 +716,7 @@ let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 4500); }
 
 /* ---------- state ---------- */
-const DEFAULT_CONFIG = { phase: 'open', deadline: '', personalReporting: false, crowdQids: [], formUrl: '' };
+const DEFAULT_CONFIG = { phase: 'open', deadline: '', personalReporting: false, crowdQids: [], formUrl: '', submitUrl: '' };
 const S = {
   db: null, uid: null, isAdmin: false, canWrite: null, myName: '',
   config: { ...DEFAULT_CONFIG },
@@ -723,6 +729,11 @@ const TABS = [['home', 'Home'], ['rules', 'Rules'], ['forecasts', 'Your Forecast
 let pendingBlank = false;
 // People who can't write to this page's database submit through the Google Form instead.
 const formMode = () => S.mineState === 'unavailable';
+// On the GitHub-hosted site, visitors fill in the page and it sends their answers to the organizer's web app.
+const httpsUrl = u => /^https:\/\//i.test(u || '') ? u : null;
+const submitMode = () => !!(window.__HOSTED__ && !window.__HOSTED__.organizer && httpsUrl(S.config.submitUrl));
+const lsGet = k => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } };
 // Static export: data is baked into the page (window.__STATIC__); no database, no sign-in, read-only.
 const STATIC = !!window.__STATIC__;
 
@@ -772,6 +783,8 @@ function renderHome() {
     STATIC ? 'Everyone submitted a probability from 1% to 99% for each statement before the deadline.'
     : formMode()
       ? 'Fill in the Google Form with a probability from 1% to 99% for each statement. Plan on 30 to 45 minutes. You can edit your response until the deadline.'
+      : submitMode()
+      ? 'Enter a probability from 1% to 99% for each statement, then press Submit at the bottom of the Your Forecast tab. Plan on 30 to 45 minutes. Your answers stay in this browser while you work, and you can submit again until the deadline to replace an earlier submission.'
       : 'Enter a probability from 1% to 99% for each statement. Plan on 30 to 45 minutes. Answers save as you go, and you can change them until the deadline.',
     'At the deadline, submissions lock and everyone’s forecasts are revealed in the Crowd tab.',
     'Through 2027, statements resolve and the Standings tab updates with scores and a running log.',
@@ -830,7 +843,44 @@ function buildForecastView() {
       sec.note ? h('p', { class: 'sec-note', text: sec.note }) : null,
       h('div', { class: 'sec-body' }, qs.map(qRow))));
   }
+  root.append(submitCard());
   updateProgress();
+}
+
+function submitCard() {
+  const email = h('input', { type: 'email', id: 'sub-email', autocomplete: 'email', placeholder: 'you@university.edu', value: lsGet('credence-email') });
+  email.addEventListener('input', () => lsSet('credence-email', email.value.trim()));
+  const status = h('p', { class: 'small', id: 'sub-status', 'aria-live': 'polite', text: lsGet('credence-submitted') ? 'Last submitted ' + lsGet('credence-submitted') + '. Submit again to replace it.' : '' });
+  return h('div', { class: 'card stack', id: 'submit-card', hidden: true },
+    h('h2', { text: 'Submit your forecasts' }),
+    h('p', { class: 'muted', id: 'sub-count' }),
+    h('p', { text: 'Your email is used only to match your submission to you, and it is never shown on this site. Submitting again replaces your earlier submission.' }),
+    h('div', { class: 'row' }, h('label', { for: 'sub-email', class: 'muted small', text: 'Your email' }), email),
+    h('div', { class: 'row' }, confirmBtn('Submit forecasts', 'Click again to submit', doSubmit, 'btn primary')),
+    status);
+}
+function updateSubCount() {
+  const el = $('#sub-count'); if (!el) return;
+  const n = answeredCount(), left = QUESTIONS.length - n;
+  el.textContent = n + ' of ' + QUESTIONS.length + ' answered.' + (left ? ' The ' + left + ' blank ' + (left === 1 ? 'answer' : 'answers') + ' will be scored as 50%.' : '');
+}
+async function doSubmit() {
+  const st = $('#sub-status'), email = $('#sub-email').value.trim(), name = (S.mine.name || '').trim();
+  const fail = m => { st.textContent = m; };
+  if (!name) return fail('Add your name at the top of the page first.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Enter a valid email address.');
+  if (!answeredCount()) return fail('Answer at least one statement first.');
+  const url = httpsUrl(S.config.submitUrl);
+  if (!url) return fail('Submissions aren’t set up on this site yet.');
+  st.textContent = 'Submitting…';
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ name, email, p: S.mine.p }) });
+    let j = null; try { j = await r.json(); } catch (e) { /* not JSON */ }
+    if (!j || !j.ok) throw new Error((j && j.error) || 'the server did not confirm the submission');
+    const when = new Date().toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    lsSet('credence-submitted', when);
+    st.textContent = 'Submitted ' + when + ' (' + j.answered + ' answers received). You can change answers and submit again before the deadline.';
+  } catch (e) { fail('Not submitted: ' + errMsg(e) + '. Your answers are still kept in this browser; try again in a minute.'); }
 }
 
 function qRow(q) {
@@ -899,6 +949,7 @@ function answeredCount(sec) {
   return QUESTIONS.filter(q => (!sec || q.sec === sec) && S.mine.p['q' + q.id] != null).length;
 }
 function paintProgress(n) {
+  updateSubCount();
   const box = $('#progress'), ready = S.mineState === 'ready';
   box.hidden = !ready;
   if (!ready) return;
@@ -957,6 +1008,7 @@ function applyFormState() {
     else if (fm) el.hidden = true;
     else if (el.id !== 'lock-note') el.hidden = false;
   }
+  const sc = $('#submit-card'); if (sc) sc.hidden = fm || !submitMode() || S.config.phase !== 'open';
   const fl = $('#form-link'), fu = safeUrl(S.config.formUrl);
   if (fl) fl.replaceChildren(fu
     ? h('a', { class: 'btn primary', href: fu, target: '_blank', rel: 'noopener noreferrer', text: 'Open the submission form' })
@@ -980,7 +1032,7 @@ async function flush() {
   saving = true; dirty = false;
   try {
     await S.db.doc('forecasts/' + S.uid).set({ v: 1, name: (S.mine.name || '').trim(), p: S.mine.p, po: S.mine.po, updatedAt: new Date().toISOString() });
-    setStatus('Saved at ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
+    setStatus((submitMode() ? 'Kept in this browser at ' : 'Saved at ') + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + (submitMode() ? '. Not submitted until you press Submit at the bottom.' : ''));
   } catch (e) {
     dirty = true; setStatus('Not saved: ' + errMsg(e) + '. Change an answer to try again.');
   }
@@ -1367,13 +1419,17 @@ function staticCard() {
 function formCard() {
   const inp = h('input', { type: 'url', id: 'form-url', placeholder: 'https://forms.gle/…', value: S.config.formUrl || '' });
   inp.style.flex = '1 1 280px';
+  const sub = h('input', { type: 'url', id: 'submit-url', placeholder: 'https://script.google.com/macros/s/…/exec', value: S.config.submitUrl || '' });
+  sub.style.flex = '1 1 280px';
   return card('Submission form',
     h('p', { text: 'People who can’t submit on this page use your Google Form. Paste the form’s link here and Home and Your Forecast will send them to it.' }),
-    h('div', { class: 'row' }, inp,
+    h('div', { class: 'row' }, inp),
+    h('p', { text: 'Direct submissions: paste the web app address from your submission script. When it is set, visitors fill in forecasts on this site and press Submit, and the Google Form link is only a fallback.' }),
+    h('div', { class: 'row' }, sub,
       h('button', { type: 'button', class: 'btn', text: 'Save link', onclick: async () => {
-        const v = inp.value.trim();
-        if (v && !safeUrl(v)) { toast('Enter a link that starts with https://'); return; }
-        try { await saveConfig({ formUrl: v }); toast('Link saved.'); } catch (e) { toast('Failed: ' + errMsg(e)); }
+        const v = inp.value.trim(), s = sub.value.trim();
+        if ((v && !httpsUrl(v)) || (s && !httpsUrl(s))) { toast('Enter links that start with https://'); return; }
+        try { await saveConfig({ formUrl: v, submitUrl: s }); toast('Saved.'); } catch (e) { toast('Failed: ' + errMsg(e)); }
       } })));
 }
 function importCard() {
